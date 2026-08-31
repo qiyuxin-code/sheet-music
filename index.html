@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>简谱批量标注</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #f5f6f8; margin: 0; color: #333; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 32px 20px 60px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p.sub { color: #888; margin: 0 0 24px; font-size: 14px; }
+  .drop { border: 2px dashed #c3c8d0; border-radius: 12px; background: #fff;
+          padding: 36px 20px; text-align: center; cursor: pointer;
+          transition: all .15s; }
+  .drop.hover { border-color: #3b82f6; background: #eff6ff; }
+  .drop input { display: none; }
+  .drop .hint { font-size: 15px; color: #666; }
+  .drop .sub2 { font-size: 12px; color: #aaa; margin-top: 6px; }
+  ul#list { list-style: none; padding: 0; margin: 16px 0; }
+  ul#list li { display: flex; justify-content: space-between; align-items: center;
+               background: #fff; border: 1px solid #e4e7ec; border-radius: 8px;
+               padding: 8px 12px; margin-bottom: 6px; font-size: 13px; }
+  ul#list li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  ul#list li .st.ok { color: #16a34a; }
+  ul#list li .st.err { color: #dc2626; }
+  ul#list li .st.doing { color: #d97706; }
+  .btn { display: inline-block; border: none; border-radius: 8px; padding: 10px 22px;
+         font-size: 15px; cursor: pointer; background: #3b82f6; color: #fff; }
+  .btn:disabled { background: #9db7dd; cursor: not-allowed; }
+  .btn.secondary { background: #e5e7eb; color: #333; }
+  .bar { height: 6px; border-radius: 3px; background: #e4e7ec; overflow: hidden;
+         margin: 14px 0 8px; display: none; }
+  .bar > div { height: 100%; width: 0; background: #3b82f6; transition: width .2s; }
+  .msg { font-size: 13px; color: #666; margin-top: 8px; min-height: 18px; }
+  .actions { margin-top: 20px; display: flex; gap: 10px; align-items: center; }
+
+  .summary { font-size: 14px; color: #16a34a; margin: 18px 0 10px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+          gap: 16px; margin-top: 10px; }
+  .card { background: #fff; border: 1px solid #e4e7ec; border-radius: 10px;
+          overflow: hidden; display: flex; flex-direction: column; }
+  .card .thumbwrap { position: relative; background: #f0f1f3; overflow: hidden; cursor: zoom-in; }
+  .card img.thumb { display: block; width: 100%; height: 200px; object-fit: contain; }
+  .card .zoom-ico { position: absolute; right: 8px; top: 8px; background: rgba(0,0,0,.55);
+                     color: #fff; font-size: 12px; border-radius: 5px; padding: 3px 7px; }
+  .card .meta { padding: 8px 12px 10px; }
+  .card .fname { font-size: 12px; color: #555; white-space: nowrap; overflow: hidden;
+                 text-overflow: ellipsis; margin-bottom: 8px; }
+  .card .ops { display: flex; gap: 6px; }
+  .card .ops button { flex: 1; border: 1px solid #dfe3e8; background: #fff; border-radius: 6px;
+                      padding: 5px 0; font-size: 12px; cursor: pointer; color: #444; }
+  .card .ops button:hover { background: #f1f5ff; border-color: #3b82f6; color: #3b82f6; }
+  .card.err { border-color: #f3c6c6; }
+  .card.err .errtxt { padding: 14px; font-size: 13px; color: #dc2626; }
+
+  .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.88); z-index: 50; }
+  .modal.open { display: flex; flex-direction: column; }
+  .modal .mbar { display: flex; justify-content: space-between; align-items: center;
+                 padding: 10px 16px; color: #eee; font-size: 13px; gap: 12px; }
+  .modal .mbar .fname { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .modal .mbar .zctrl { display: flex; gap: 6px; align-items: center; }
+  .modal .mbar button { background: rgba(255,255,255,.15); color: #fff; border: none;
+                        border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; }
+  .modal .mbar button:hover { background: rgba(255,255,255,.3); }
+  .modal .mbar .close { background: rgba(220,38,38,.7); }
+  .viewport { flex: 1; overflow: hidden; position: relative; cursor: grab; }
+  .viewport.dragging { cursor: grabbing; }
+  .viewport img { position: absolute; top: 0; left: 0; transform-origin: 0 0;
+                  transform: translate(0,0) scale(1); user-select: none;
+                  max-width: none; max-height: none; }
+  .toast { position: fixed; left: 50%; bottom: 32px; transform: translateX(-50%);
+           background: rgba(0,0,0,.8); color: #fff; padding: 9px 18px; border-radius: 8px;
+           font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>简谱批量标注</h1>
+  <p class="sub">批量上传五线谱图片，自动识别音符并叠印简谱数字，结果直接平铺展示</p>
+
+  <div class="drop" id="drop">
+    <input type="file" id="file" multiple accept="image/*">
+    <div class="hint">点击选择或拖拽图片到此处</div>
+    <div class="sub2">支持多选批量上传（jpg / png / bmp，单次最多 200 张）</div>
+  </div>
+
+  <ul id="list"></ul>
+  <div class="bar"><div id="barInner"></div></div>
+
+  <div class="actions">
+    <button class="btn" id="go" disabled>开始标注</button>
+    <button class="btn secondary" id="clear">清空</button>
+    <span class="msg" id="msg"></span>
+  </div>
+
+  <div id="resultArea"></div>
+</div>
+
+<div class="modal" id="modal">
+  <div class="mbar">
+    <span class="fname" id="mName"></span>
+    <div class="zctrl">
+      <span id="mZoom">100%</span>
+      <button id="zOut">-</button>
+      <button id="zIn">+</button>
+      <button id="zReset">适应</button>
+      <button id="mCopy">复制</button>
+      <button id="mDown">下载</button>
+      <button class="close" id="mClose">关闭</button>
+    </div>
+  </div>
+  <div class="viewport" id="viewport">
+    <img id="mImg" alt="">
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const drop = $('#drop'), fileInput = $('#file'), listEl = $('#list'),
+      goBtn = $('#go'), clearBtn = $('#clear'), msgEl = $('#msg'),
+      bar = $('.bar'), barInner = $('#barInner'), resultArea = $('#resultArea'),
+      modal = $('#modal'), viewport = $('#viewport'), mImg = $('#mImg'),
+      mName = $('#mName'), mZoom = $('#mZoom');
+let files = [];
+let viewState = null;  // {img, zoom, tx, ty}
+
+/* ---------- 文件选择 ---------- */
+function renderList() {
+  listEl.innerHTML = '';
+  files.forEach((f, i) => {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = `${i + 1}. ${f.name}`;
+    const st = document.createElement('span');
+    st.className = 'st';
+    st.textContent = f.status || '待处理';
+    if (f.status === '成功') st.classList.add('ok');
+    else if (f.status === '失败') st.classList.add('err');
+    else if (f.status === '处理中') st.classList.add('doing');
+    if (f.error) st.title = f.error;
+    li.append(name, st);
+    listEl.appendChild(li);
+  });
+  goBtn.disabled = files.length === 0;
+}
+function addFiles(list) {
+  for (const f of list) files.push({ name: f.name, file: f, status: '' });
+  renderList();
+}
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('hover'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('hover'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('hover'); addFiles(e.dataTransfer.files); });
+fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
+clearBtn.addEventListener('click', () => {
+  files = []; renderList(); resultArea.innerHTML = ''; msgEl.textContent = '';
+});
+
+/* ---------- 复制 / 下载 ---------- */
+let toastTimer = null;
+function toast(text) {
+  $('#toast').textContent = text;
+  $('#toast').classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('#toast').classList.remove('show'), 1600);
+}
+async function copyImage(dataUrl) {
+  try {
+    const blob = await (await fetch(dataUrl)).blob();
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+    toast('已复制到剪贴板');
+  } catch (e) {
+    toast('复制失败，请改用下载');
+  }
+}
+function downloadImage(dataUrl, name) {
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/* ---------- 结果展示 ---------- */
+function showResults(results) {
+  resultArea.innerHTML = '';
+  const ok = results.filter(r => r.status === 'ok');
+  const err = results.length - ok.length;
+  const s = document.createElement('div');
+  s.className = 'summary';
+  s.textContent = `共 ${results.length} 张：成功 ${ok.length} 张，失败 ${err} 张`;
+  resultArea.appendChild(s);
+
+  const grid = document.createElement('div');
+  grid.className = 'grid';
+  results.forEach(r => {
+    const card = document.createElement('div');
+    card.className = 'card' + (r.status === 'ok' ? '' : ' err');
+    if (r.status === 'ok') {
+      const tw = document.createElement('div');
+      tw.className = 'thumbwrap';
+      const img = document.createElement('img');
+      img.className = 'thumb';
+      img.src = 'data:image/jpeg;base64,' + r.thumb;
+      img.alt = r.filename;
+      const ico = document.createElement('div');
+      ico.className = 'zoom-ico';
+      ico.textContent = '🔍';
+      tw.append(img, ico);
+      tw.addEventListener('click', () => openModal(r));
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const fn = document.createElement('div');
+      fn.className = 'fname';
+      fn.textContent = r.filename;
+      const ops = document.createElement('div');
+      ops.className = 'ops';
+      const bCopy = document.createElement('button');
+      bCopy.textContent = '复制';
+      bCopy.addEventListener('click', e => { e.stopPropagation(); copyImage('data:image/jpeg;base64,' + r.img); });
+      const bDown = document.createElement('button');
+      bDown.textContent = '下载';
+      bDown.addEventListener('click', e => {
+        e.stopPropagation();
+        downloadImage('data:image/jpeg;base64,' + r.img,
+                      r.filename.replace(/\.[^.]+$/, '') + '_简谱标注.jpg');
+      });
+      const bView = document.createElement('button');
+      bView.textContent = '放大';
+      bView.addEventListener('click', e => { e.stopPropagation(); openModal(r); });
+      ops.append(bCopy, bDown, bView);
+      meta.append(fn, ops);
+      card.append(tw, meta);
+    } else {
+      const et = document.createElement('div');
+      et.className = 'errtxt';
+      et.textContent = `${r.filename}：${r.error}`;
+      card.appendChild(et);
+    }
+    grid.appendChild(card);
+  });
+  resultArea.appendChild(grid);
+}
+
+/* ---------- 放大预览 ---------- */
+function openModal(r) {
+  mName.textContent = r.filename;
+  mImg.src = 'data:image/jpeg;base64,' + r.img;
+  mImg.onload = () => {
+    viewState = { img: mImg, zoom: 1, tx: 0, ty: 0 };
+    viewport.scrollLeft = 0; viewport.scrollTop = 0;
+    fitView();
+  };
+  modal.classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+function closeModal() {
+  modal.classList.remove('open');
+  document.body.style.overflow = '';
+  mImg.src = '';
+  viewState = null;
+}
+function applyTransform() {
+  if (!viewState) return;
+  const { zoom, tx, ty } = viewState;
+  mImg.style.transform = `translate(${tx}px, ${ty}px) scale(${zoom})`;
+  mZoom.textContent = Math.round(zoom * 100) + '%';
+}
+function fitView() {
+  if (!viewState) return;
+  const vw = viewport.clientWidth, vh = viewport.clientHeight;
+  const iw = mImg.naturalWidth, ih = mImg.naturalHeight;
+  if (!iw) return;
+  viewState.zoom = Math.min(1, vw / iw, vh / ih);
+  viewState.tx = (vw - iw * viewState.zoom) / 2;
+  viewState.ty = (vh - ih * viewState.zoom) / 2;
+  applyTransform();
+}
+function zoomAt(px, py, factor) {
+  if (!viewState) return;
+  const { zoom } = viewState;
+  const nz = Math.max(0.05, Math.min(20, zoom * factor));
+  if (nz === zoom) return;
+  const vw = viewport.clientWidth, vh = viewport.clientHeight;
+  const cx = (px - viewState.tx) / zoom, cy = (py - viewState.ty) / zoom;
+  viewState.zoom = nz;
+  viewState.tx = px - cx * nz;
+  viewState.ty = py - cy * nz;
+  applyTransform();
+}
+$('#zIn').addEventListener('click', () => zoomAt(viewport.clientWidth / 2, viewport.clientHeight / 2, 1.3));
+$('#zOut').addEventListener('click', () => zoomAt(viewport.clientWidth / 2, viewport.clientHeight / 2, 1 / 1.3));
+$('#zReset').addEventListener('click', fitView);
+$('#mClose').addEventListener('click', closeModal);
+modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+viewport.addEventListener('wheel', e => {
+  e.preventDefault();
+  const rect = viewport.getBoundingClientRect();
+  zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.15 : 1 / 1.15);
+}, { passive: false });
+viewport.addEventListener('mousedown', e => {
+  if (!viewState) return;
+  viewport.classList.add('dragging');
+  const sx = e.clientX, sy = e.clientY, { tx, ty } = viewState;
+  const move = ev => {
+    viewState.tx = tx + (ev.clientX - sx);
+    viewState.ty = ty + (ev.clientY - sy);
+    applyTransform();
+  };
+  const up = () => { viewport.classList.remove('dragging'); window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+$('#mCopy').addEventListener('click', () => copyImage(mImg.src));
+$('#mDown').addEventListener('click', () =>
+  downloadImage(mImg.src, mName.textContent.replace(/\.[^.]+$/, '') + '_简谱标注.jpg'));
+
+/* ---------- 提交 ---------- */
+goBtn.addEventListener('click', async () => {
+  goBtn.disabled = true; clearBtn.disabled = true;
+  msgEl.textContent = '上传处理中…';
+  bar.style.display = 'block'; barInner.style.width = '20%';
+  files.forEach(f => { if (f.status !== '成功' && f.status !== '失败') f.status = '处理中'; });
+  renderList();
+  const form = new FormData();
+  files.forEach(f => form.append('files', f.file, f.name));
+  try {
+    const resp = await fetch('/api/batch', { method: 'POST', body: form });
+    if (!resp.ok) throw new Error(`服务器错误 ${resp.status}`);
+    const data = await resp.json();
+    files.forEach(f => { f.status = '成功'; });
+    showResults(data.results);
+    msgEl.textContent = '处理完成';
+    barInner.style.width = '100%';
+  } catch (e) {
+    files.forEach(f => { if (f.status === '处理中') { f.status = '失败'; f.error = e.message; } });
+    msgEl.textContent = '处理失败：' + e.message;
+  }
+  renderList();
+  goBtn.disabled = files.length === 0;
+  clearBtn.disabled = false;
+  setTimeout(() => { bar.style.display = 'none'; barInner.style.width = '0'; }, 1000);
+});
+</script>
+</body>
+</html>
