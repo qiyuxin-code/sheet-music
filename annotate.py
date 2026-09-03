@@ -186,19 +186,195 @@ def _match_template(black: np.ndarray, tpl: np.ndarray, th: float, nms_w: int, n
     return pts
 
 
-def detect_hollow_heads(black: np.ndarray) -> list[tuple[int, int]]:
+def detect_hollow_heads(black: np.ndarray, s: float) -> list[tuple[int, int]]:
     """空心头 = 被黑色包围的白色小洞。返回 (中心x,中心y)。"""
-    white = (black == 0).astype(np.uint8) * 255
-    num, labels, stats, cents = cv2.connectedComponentsWithStats(white, 8)
-    holes = []
     H, W = black.shape
-    for i in range(1, num):
-        x, y, w, h, a = stats[i]
-        if x == 0 or y == 0 or x + w >= W or y + h >= H:
+    min_w = max(2, int(round(0.35 * s)))
+    max_w = max(min_w + 1, int(round(1.40 * s)))
+    min_h = max(2, int(round(0.30 * s)))
+    max_h = max(min_h + 1, int(round(1.10 * s)))
+    min_a = max(3, int(round(0.12 * s * s)))
+    max_a = max(min_a + 1, int(round(1.05 * s * s)))
+    _, black_labels, black_stats, _ = cv2.connectedComponentsWithStats(
+        (black > 0).astype(np.uint8) * 255, 8
+    )
+
+    def outer_labels(cx: int, cy: int) -> set[int]:
+        rx = max(2, int(round(1.4 * s)))
+        ry = max(2, int(round(1.0 * s)))
+        x0, x1 = max(0, cx - rx), min(W, cx + rx + 1)
+        y0, y1 = max(0, cy - ry), min(H, cy + ry + 1)
+        labels = set(int(v) for v in np.unique(black_labels[y0:y1, x0:x1]) if v)
+        enclosing: set[int] = set()
+        for label in labels:
+            x, y, w, h, _ = black_stats[label]
+            if not (x <= cx < x + w and y <= cy < y + h):
+                continue
+            enclosing.add(label)
+        return enclosing
+
+    def has_notehead_outer_geometry(cx: int, cy: int, labels: set[int]) -> bool:
+        rx = max(2, int(round(1.4 * s)))
+        ry = max(2, int(round(1.0 * s)))
+        x0, x1 = max(0, cx - rx), min(W, cx + rx + 1)
+        y0, y1 = max(0, cy - ry), min(H, cy + ry + 1)
+        for label in labels:
+            ys, xs = np.where(black_labels[y0:y1, x0:x1] == label)
+            if len(xs) == 0:
+                continue
+            width = int(xs.max() - xs.min() + 1)
+            height = int(ys.max() - ys.min() + 1)
+            if not (
+                0.70 * s <= width <= 2.40 * s
+                and 0.50 * s <= height <= 2.20 * s
+            ):
+                continue
+            abs_xs = xs + x0
+            abs_ys = ys + y0
+            side = max(1, int(round(0.20 * s)))
+            if (
+                np.any(abs_xs <= cx - side)
+                and np.any(abs_xs >= cx + side)
+                and np.any(abs_ys <= cy - side)
+                and np.any(abs_ys >= cy + side)
+            ):
+                return True
+        return False
+
+    def shares_chord_structure(
+        recovered: tuple[int, int],
+        raw: tuple[int, int],
+    ) -> bool:
+        cx, cy = recovered
+        rx, ry = raw
+        recovered_outer = outer_labels(cx, cy)
+        if not recovered_outer or not has_notehead_outer_geometry(cx, cy, recovered_outer):
+            return False
+        raw_outer = outer_labels(rx, ry)
+        if recovered_outer & raw_outer:
+            return True
+
+        # Scanned hollow chords can have heads disconnected from their shared stem.
+        # Require a near-continuous side stroke belonging to the validating raw head.
+        y0, y1 = sorted((cy, ry))
+        span = y1 - y0 + 1
+        if span <= 1:
+            return False
+        max_side = max(2, int(round(2.2 * s)))
+        min_side = max(1, int(round(0.45 * s)))
+        max_contour_gap = max(1, int(round(1.15 * s)))
+        center_x = int(round((cx + rx) / 2))
+        envelope_r = max(2, int(round(1.0 * s)))
+        envelope_y0 = max(0, cy - envelope_r)
+        envelope_y1 = min(H, cy + envelope_r + 1)
+        _, contour_xs = np.where(np.isin(
+            black_labels[envelope_y0:envelope_y1, :],
+            list(recovered_outer),
+        ))
+        if len(contour_xs) == 0:
+            return False
+        for x in range(max(0, center_x - max_side), min(W, center_x + max_side + 1)):
+            if abs(x - cx) < min_side or abs(x - rx) < min_side:
+                continue
+            column = black_labels[y0:y1 + 1, x]
+            for label in raw_outer:
+                if int((column == label).sum()) < math.ceil(0.85 * span):
+                    continue
+                empty_gap = max(0, int(np.min(np.abs(contour_xs - x))) - 1)
+                if empty_gap <= max_contour_gap:
+                    return True
+        return False
+
+    def enclosed_candidates(ink: np.ndarray) -> list[tuple[int, int, int]]:
+        white = (ink == 0).astype(np.uint8) * 255
+        num, _, stats, cents = cv2.connectedComponentsWithStats(white, 8)
+        found: list[tuple[int, int, int]] = []
+        for i in range(1, num):
+            x, y, w, h, a = stats[i]
+            if x == 0 or y == 0 or x + w >= W or y + h >= H:
+                continue
+            if min_w <= w <= max_w and min_h <= h <= max_h and min_a <= a <= max_a:
+                found.append((
+                    int(round(cents[i][0])),
+                    int(round(cents[i][1])),
+                    int(a),
+                ))
+        return found
+
+    candidates = enclosed_candidates(black)
+    if candidates:
+        radius = max(1, int(round(0.17 * s)))
+        kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (2 * radius + 1, 2 * radius + 1))
+        closed_candidates = enclosed_candidates(cv2.morphologyEx(black, cv2.MORPH_CLOSE, kernel))
+        align_x = max(2, int(round(0.35 * s)))
+        min_dy = max(2, int(round(0.50 * s)))
+        max_dy = max(min_dy + 1, int(round(4.0 * s)))
+        raw_centers = [(cx, cy) for cx, cy, _ in candidates]
+        for cx, cy, area in closed_candidates:
+            if any(
+                abs(cx - rx) <= align_x and min_dy <= abs(cy - ry) <= max_dy
+                and shares_chord_structure((cx, cy), (rx, ry))
+                for rx, ry in raw_centers
+            ):
+                candidates.append((cx, cy, area))
+
+    tol = max(2, int(round(0.25 * s)))
+    candidates.sort(key=lambda item: -item[2])
+    holes: list[tuple[int, int]] = []
+    for cx, cy, _ in candidates:
+        if any(abs(cx - hx) < tol and abs(cy - hy) < tol for hx, hy in holes):
             continue
-        if 12 <= a <= 95 and 4 <= w <= 14 and 4 <= h <= 10:
-            holes.append((int(round(cents[i][0])), int(round(cents[i][1]))))
+        holes.append((cx, cy))
     return holes
+
+
+def _dedupe_hollow_centers(centers: list[tuple[int, int]], s: float) -> list[tuple[int, int]]:
+    tol = max(2, int(round(0.25 * s)))
+    deduped: list[tuple[int, int]] = []
+    for cx, cy in centers:
+        if any(abs(cx - hx) < tol and abs(cy - hy) < tol for hx, hy in deduped):
+            continue
+        deduped.append((cx, cy))
+    return deduped
+
+
+def _staff_vertical_band(staff: Staff) -> tuple[int, int]:
+    s = staff.spacing
+    return min(staff.lines) - int(2.5 * s), max(staff.lines) + int(2.5 * s)
+
+
+def _collect_staff_hollow_centers(page: Page, black: np.ndarray) -> list[tuple[int, int]]:
+    """Detect hollow heads per staff with provenance; merge without cross-staff max-spacing dedup."""
+    if not page.staves:
+        s = page.systems[0].treble.spacing if page.systems else 11.0
+        y_min, y_max = 0, black.shape[0]
+        return _dedupe_hollow_centers([
+            (hx, hy)
+            for hx, hy in detect_hollow_heads(black, s)
+            if y_min <= hy <= y_max
+        ], s)
+
+    kept: list[tuple[int, int]] = []
+    for st in page.staves:
+        y_min, y_max = _staff_vertical_band(st)
+        staff_holes = _dedupe_hollow_centers([
+            (hx, hy)
+            for hx, hy in detect_hollow_heads(black, st.spacing)
+            if y_min <= hy <= y_max
+        ], st.spacing)
+        for hx, hy in staff_holes:
+            nearest = _nearest_staff(hy, page.staves)
+            if nearest is st:
+                kept.append((hx, hy))
+    return kept
+
+
+def _note_spacing(n: NoteHead, page: Page) -> float:
+    if page.staves:
+        st = _nearest_staff(n.y, page.staves)
+        if st is not None:
+            return st.spacing
+    return page.systems[0].treble.spacing if page.systems else 11.0
 
 
 def detect_noteheads(page: Page) -> None:
@@ -224,25 +400,41 @@ def detect_noteheads(page: Page) -> None:
         if y_min <= cy <= y_max:
             page.noteheads.append(NoteHead(x=x + cw // 2, y=cy, filled=True))
 
-    # 空心头（白洞）
-    for hx, hy in detect_hollow_heads(black):
-        if y_min <= hy <= y_max:
-            page.noteheads.append(NoteHead(x=hx, y=hy, filled=False))
+    # 空心头（白洞）：按谱表独立检测，保留谱表归属后合并
+    for hx, hy in _collect_staff_hollow_centers(page, black):
+        page.noteheads.append(NoteHead(x=hx, y=hy, filled=False))
 
     page.noteheads.sort(key=lambda n: (n.y, n.x))
-    page.noteheads = [n for n in page.noteheads if _is_real_notehead(black, n, s)]
+    page.noteheads = [
+        n for n in page.noteheads
+        if (
+            _is_real_notehead(black, n, _note_spacing(n, page))
+            or (
+                not n.filled
+                and _is_real_notehead(
+                    black, n, _note_spacing(n, page), recover_open_hollow=True
+                )
+            )
+        )
+    ]
     for i, n in enumerate(page.noteheads):
         n.id = i
 
 
-def _is_real_notehead(black: np.ndarray, n: NoteHead, s: float) -> bool:
+def _is_real_notehead(
+    black: np.ndarray,
+    n: NoteHead,
+    s: float,
+    recover_open_hollow: bool = False,
+) -> bool:
     """剔除非音符的误检：短横线、谱号等大字形。
 
-    - 实心：黑像素包围盒或中心连通块过扁（高度 ≤ 8px）→ 短横线；包围盒过稀疏 → 谱号。
+    - 实心：黑像素包围盒或中心连通块过扁 → 短横线；包围盒过稀疏 → 谱号。
     - 空心：不再用"白洞两侧厚墨"判别（会把真实空心音符环误删），仅保留洞的封闭性判断。
     """
-    y0, y1 = max(0, n.y - 12), min(black.shape[0], n.y + 13)
-    x0, x1 = max(0, n.x - 12), min(black.shape[1], n.x + 13)
+    pad = int(max(12, round(1.1 * s)))
+    y0, y1 = max(0, n.y - pad), min(black.shape[0], n.y + pad + 1)
+    x0, x1 = max(0, n.x - pad), min(black.shape[1], n.x + pad + 1)
     p = black[y0:y1, x0:x1]
     if p.size == 0:
         return False
@@ -251,10 +443,12 @@ def _is_real_notehead(black: np.ndarray, n: NoteHead, s: float) -> bool:
     if len(ys) == 0:
         return False
     bh = int(ys.max() - ys.min() + 1)
-    if bh <= 8:
-        return False  # 横条
+    bar_h = max(6, int(round(0.75 * s)))
 
     if n.filled:
+        if bh <= bar_h:
+            return False  # 横条
+
         # 中心连通块过扁 → 短横线（如 (260,203)）
         num, lab, stats, _ = cv2.connectedComponentsWithStats((p > 0).astype(np.uint8) * 255, 8)
         cy, cx = n.y - y0, n.x - x0
@@ -264,7 +458,7 @@ def _is_real_notehead(black: np.ndarray, n: NoteHead, s: float) -> bool:
             if bx <= cx <= bx + bw and by <= cy <= by + bh2:
                 if best is None or ba > best[4]:
                     best = stats[i]
-        if best is not None and best[3] <= 8:
+        if best is not None and best[3] <= bar_h:
             return False
         # 黑像素包围盒过稀疏 → 谱号等大字形（如低音谱号 dens≈0.17）
         w = int(xs.max() - xs.min() + 1)
@@ -273,17 +467,25 @@ def _is_real_notehead(black: np.ndarray, n: NoteHead, s: float) -> bool:
             return False
         return True
 
-    # 空心：白洞须是封闭的（在窗口内不接触边框）
-    white = (p == 0).astype(np.uint8) * 255
+    # 空心：默认保持原始封闭性；仅对首轮失败的恢复候选使用谱距缩放闭运算。
+    hollow_ink = p
+    if recover_open_hollow:
+        radius = max(1, int(round(0.17 * s)))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_CROSS, (2 * radius + 1, 2 * radius + 1)
+        )
+        hollow_ink = cv2.morphologyEx(p, cv2.MORPH_CLOSE, kernel)
+    white = (hollow_ink == 0).astype(np.uint8) * 255
     num, lab, stats, cents = cv2.connectedComponentsWithStats(white, 8)
     cx, cy = n.x - x0, n.y - y0
+    hole_tol = max(4, int(round(0.35 * s)))
     hole = None
     for i in range(1, num):
         x, y, w, h, a = stats[i]
         if x == 0 or y == 0 or x + w >= W or y + h >= H:
             continue
         bccx, bccy = cents[i]
-        if abs(bccx - cx) <= 4 and abs(bccy - cy) <= 4:
+        if abs(bccx - cx) <= hole_tol and abs(bccy - cy) <= hole_tol:
             if hole is None or a > hole[4]:
                 hole = stats[i]
     return hole is not None
@@ -329,39 +531,128 @@ def _remove_clef_zone(page: Page) -> None:
                 page.noteheads.remove(n)
 
 
+def _staff_left_edge(gray: np.ndarray, staff: Staff) -> int | None:
+    """从谱线灰度图估算单个谱表的左边界（各谱线长水平段左端点的中位数）。"""
+    h, w = gray.shape
+    band_h = max(2, int(round(staff.spacing * 0.3)))
+    kernel_w = max(50, w // 12)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, 1))
+    min_run = max(20, kernel_w // 3)
+    lefts: list[int] = []
+    for y in staff.lines:
+        y0 = max(0, y - band_h)
+        y1 = min(h, y + band_h + 1)
+        band = gray[y0:y1, :]
+        _, soft = cv2.threshold(band, 200, 255, cv2.THRESH_BINARY_INV)
+        opened = cv2.morphologyEx(soft, cv2.MORPH_OPEN, kernel)
+        rel_y = min(y - y0, opened.shape[0] - 1)
+        row = opened[rel_y]
+        xs = np.where(row > 0)[0]
+        if len(xs) >= min_run:
+            lefts.append(int(xs[0]))
+    if not lefts:
+        return None
+    return int(np.median(lefts))
+
+
+def _has_compact_filled_head(black: np.ndarray, n: NoteHead, s: float) -> bool:
+    """Note-sized filled blob at candidate center (not a tall-narrow symbol body)."""
+    pad = int(max(6, 0.85 * s))
+    y0, y1 = max(0, n.y - pad), min(black.shape[0], n.y + pad + 1)
+    x0, x1 = max(0, n.x - pad), min(black.shape[1], n.x + pad + 1)
+    p = black[y0:y1, x0:x1]
+    num, _, stats, _ = cv2.connectedComponentsWithStats((p > 0).astype(np.uint8) * 255, 8)
+    cx, cy = n.x - x0, n.y - y0
+    for i in range(1, num):
+        bx, by, bw, bh, _ = stats[i]
+        if bx <= cx <= bx + bw and by <= cy <= by + bh:
+            if 0.55 * s <= bh <= 1.45 * s and 0.7 * s <= bw <= 2.0 * s:
+                return True
+    return False
+
+
+def _has_adjacent_stem_or_beam(black: np.ndarray, n: NoteHead, s: float) -> bool:
+    stems = stem_mask(black, s)
+    beams = beam_mask(black, s)
+    x0, x1 = max(0, n.x - 8), min(black.shape[1], n.x + 9)
+    head_half = int(max(3, 0.55 * s))
+    up = int((stems[max(0, n.y - 34):n.y - head_half, x0:x1] > 0).sum())
+    dn = int((stems[n.y + head_half:min(black.shape[0], n.y + 36), x0:x1] > 0).sum())
+    if (up + dn) > int(s * 1.2):
+        return True
+    beam_above = int((beams[max(0, n.y - 40):n.y - head_half, x0:x1] > 0).sum())
+    beam_below = int((beams[n.y + head_half:min(black.shape[0], n.y + 40), x0:x1] > 0).sum())
+    return (beam_above + beam_below) > max(8, int(s * 0.8))
+
+
+def _has_strong_filled_note_evidence(black: np.ndarray, n: NoteHead, s: float) -> bool:
+    """Only a filled notehead with local stem/beam evidence can end the zone."""
+    return (
+        n.filled
+        and _has_compact_filled_head(black, n, s)
+        and _has_adjacent_stem_or_beam(black, n, s)
+    )
+
+
+def _symbol_zone_remove_right(
+    left: int,
+    max_right: float,
+    staff: Staff,
+    noteheads: list[NoteHead],
+    black: np.ndarray,
+    s: float,
+) -> float:
+    """Exclusive right edge of removable symbol zone; stops at first strong note."""
+    for n in sorted(noteheads, key=lambda nh: nh.x):
+        if n.staff is not staff or n.x < left or n.x >= max_right:
+            continue
+        if _has_strong_filled_note_evidence(black, n, s):
+            return float(n.x)
+    return max_right
+
+
 def _remove_leading_symbols(page: Page) -> None:
     """移除每行谱表最左侧符号区（谱号/调号 b#/拍号/速度记号）产生的误检音符头。
 
-    对每个谱表，从最左端向右扫描音符头：若其中心落在"高窄字形"连通块内
-    （高 1.6~3.2*s、宽 0.4~1.5*s，与临时记号同形状），说明该"音符头"其实是
-    符号字形的一部分（如拍号 4/4 的 "4" 内孔、调号 ♭ 的弧腹），予以移除；
-    遇到第一个不属于此类字形的音符头即停止（符号区结束）。
-    真实音符的连通块要么只有符头（高 ~1*s），要么带符干（高 ≥ 3.2*s），
-    要么与横梁合并（更宽），故不会被误判。
+    对每个谱表，先按灰度谱线估算左边界，在不超过 ``left + 7*s`` 的有限区间内
+    移除符号候选；只有具有可靠局部符头及符干/横梁证据的实心候选可以提前结束
+    非空心候选的移除区间。空心候选不能结束区域，且在整个严格排他的
+    ``left + 7*s`` 硬边界内始终移除。硬边界本身为排他的，边界上及之外的候选
+    不受影响。
     """
     black = page.binary
-    s = page.systems[0].treble.spacing if page.systems else 11.0
+    gray = page.image
     if not page.noteheads:
         return
-    num, _, stats, _ = cv2.connectedComponentsWithStats(black, 8)
-    glyphs = []
-    for i in range(1, num):
-        x, y, w, h, _ = stats[i]
-        if 1.6 * s <= h <= 3.2 * s and 0.4 * s <= w <= 1.5 * s:
-            glyphs.append((x, y, w, h))
-    if not glyphs:
-        return
 
-    def in_glyph(n: NoteHead) -> bool:
-        return any(gx <= n.x <= gx + gw and gy <= n.y <= gy + gh
-                   for gx, gy, gw, gh in glyphs)
-
+    staff_bounds: dict[int, tuple[int, float, float]] = {}
     for st in page.staves:
-        ns = sorted([n for n in page.noteheads if n.staff is st], key=lambda n: n.x)
-        for n in ns:
-            if not in_glyph(n):
-                break
-            page.noteheads.remove(n)
+        left = _staff_left_edge(gray, st)
+        if left is None:
+            continue
+        hard_right = left + 7.0 * st.spacing
+        anchor_right = _symbol_zone_remove_right(
+            left, hard_right, st, page.noteheads, black, st.spacing
+        )
+        staff_bounds[id(st)] = (left, anchor_right, hard_right)
+
+    remove_ids: set[int] = set()
+    for st in page.staves:
+        bounds = staff_bounds.get(id(st))
+        if bounds is None:
+            continue
+        left, anchor_right, hard_right = bounds
+        for n in page.noteheads:
+            if n.staff is not st or n.x < left:
+                continue
+            if not n.filled:
+                if n.x < hard_right:
+                    remove_ids.add(id(n))
+            elif n.x < anchor_right:
+                remove_ids.add(id(n))
+
+    if remove_ids:
+        page.noteheads = [n for n in page.noteheads if id(n) not in remove_ids]
 
 
 # ---------- 第 3 步：音高换算 ----------
@@ -695,6 +986,53 @@ def build_chords(page: Page) -> None:
         ev.heads.sort(key=lambda h: h.y)
 
 
+def _head_features(h: NoteHead) -> tuple:
+    return (h.digit, h.dots, h.prefix, h.dur)
+
+
+def _event_signature(event: ChordEvent) -> tuple:
+    seen: set[tuple] = set()
+    feats: list[tuple] = []
+    for h in event.heads:
+        feat = _head_features(h)
+        if feat in seen:
+            continue
+        seen.add(feat)
+        feats.append(feat)
+    return tuple(sorted(feats))
+
+
+def _event_view_for_render(event: ChordEvent) -> ChordEvent:
+    """View event with duplicate member feature tuples collapsed for rendering."""
+    seen: set[tuple] = set()
+    heads: list[NoteHead] = []
+    for h in event.heads:
+        feat = _head_features(h)
+        if feat in seen:
+            continue
+        seen.add(feat)
+        heads.append(h)
+    if len(heads) == len(event.heads):
+        return event
+    return ChordEvent(x=event.x, heads=heads)
+
+
+def _dedupe_consecutive_events(events: list[ChordEvent]) -> list[ChordEvent]:
+    """Per-staff consecutive dedup by normalized event signature; returns render views."""
+    if not events:
+        return []
+    prev_sig: dict[int, tuple] = {}
+    result: list[ChordEvent] = []
+    for ev in sorted(events, key=lambda e: e.x):
+        staff_id = id(ev.heads[0].staff)
+        sig = _event_signature(ev)
+        if prev_sig.get(staff_id) == sig:
+            continue
+        result.append(_event_view_for_render(ev))
+        prev_sig[staff_id] = sig
+    return result
+
+
 # ---------- 第 6 步：渲染叠印 ----------
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -712,8 +1050,12 @@ def render(page: Page, out_path: Path | None = None, debug: bool = False) -> np.
     occupied = np.zeros(vis.shape[:2], dtype=bool)
 
     for sys in page.systems:
-        treble_evs = [ev for ev in page.chords if ev.heads[0].staff is sys.treble]
-        bass_evs = [ev for ev in page.chords if ev.heads[0].staff is sys.bass]
+        treble_evs = _dedupe_consecutive_events(
+            [ev for ev in page.chords if ev.heads[0].staff is sys.treble]
+        )
+        bass_evs = _dedupe_consecutive_events(
+            [ev for ev in page.chords if ev.heads[0].staff is sys.bass]
+        )
         mid_y = (sys.treble.bottom + sys.bass.top) / 2.0
         bounds = (sys.treble.top, sys.treble.bottom, sys.bass.top, sys.bass.bottom)
         _render_group(vis, page.binary, treble_evs, sys.treble, top=True, s=s, scale=scale, bounds=bounds, occupied=occupied)
@@ -827,11 +1169,10 @@ def _render_group(vis, black, evs, staff, top, s, scale, mid_y=0, bounds=None, o
 
     数字堆叠紧贴对应和弦最高音符头上方，最低音数字在下、最高音在上。
     位置优先级：
-      - 高音谱表：优先标注在高音谱表上方，空间不够小幅上移（幅度限 ~2*line_h）；
-      - 低音谱表：优先放在高音/低音两谱表之间，区域内放不下则放到低音谱表下方；
-      - 若上下区域都不够：放到音符右侧（要求右侧无其他谱面符号/已标注数字）；
-        高音谱表"上方区域不够"指找不到完全高于谱表顶线的空位，此时先试右侧，
-        右侧也不行才退回谱表内的妥协空位。
+      - 所有谱表：从音符正上方开始向图像顶部搜索，不要求完全高于谱表顶线；
+      - 上方全部不可用时，低音谱表再尝试谱表下方；
+      - 若上下区域都不够：从音符右侧开始逐步向右搜索；
+      - 标准候选全部失败时，将兼容位置拟合到图内且不反转堆叠方向。
     """
     H, W = vis.shape[:2]
     line_h = int(s * 2.2)          # 数字行高（含和弦叠放）
@@ -883,34 +1224,29 @@ def _render_group(vis, black, evs, staff, top, s, scale, mid_y=0, bounds=None, o
             return top, bottom
 
         # 整体定位优先级：
-        #   高音谱表 → 优先标注在高音谱表上方（从音符头正上方起向上找空位）；
-        #   低音谱表 → 优先放在两谱表之间，放不下再放低音谱表下方；
-        #   上下区域都不够 → 放在音符右侧（要求右侧无其他谱面符号/标注）。
+        #   所有谱表 → 从音符头正上方起，向图像顶部完整搜索空位；
+        #   低音谱表上方全不可用 → 尝试谱表下方；
+        #   上下区域都不够 → 从音符右侧向右搜索。
         x_off = 0
         limit = 2 * line_h
-        need_right = False                    # 上下区域都不够 → 尝试放右侧
-        if top:
-            y_best, dir_sign = y_row, -1   # dir_sign=-1：向上堆叠（最低音在下）
-            def above_staff(cand):
-                return stack_bounds(cand, dir_sign)[1] <= staff.top - int(s * 0.4)
-            if not (grp_clear(y_best, x_off, dir_sign) and above_staff(y_best)):
-                first_clear = y_best if grp_clear(y_best, x_off, dir_sign) else None
-                chosen = None
-                for k in range(1, limit + 1):
-                    cand = y_row - 2 * k
-                    if cand < 0:
-                        break
-                    if grp_clear(cand, x_off, dir_sign):
-                        if first_clear is None:
-                            first_clear = cand
-                        if above_staff(cand):
-                            chosen = cand
-                            break
-                y_best = chosen if chosen is not None else (first_clear if first_clear is not None else y_row)
-                # 找不到完全高于谱表顶线的空位 = 上方区域不够 → 先试右侧，
-                # 右侧也不行再退回 first_clear（谱表内妥协位）或 y_row
-                need_right = chosen is None
-        else:
+        y_best, dir_sign = y_row, -1       # dir_sign=-1：向上堆叠（最低音在下）
+        above_found = None
+        cand = y_row
+        while True:
+            _left, cand_top, _right, _bottom = _stack_bounds_xy(
+                cand, x_off, dir_sign, members, step
+            )
+            if cand_top < 0:
+                break
+            if grp_clear(cand, x_off, dir_sign):
+                above_found = cand
+                break
+            cand -= 2
+
+        need_right = above_found is None
+        if above_found is not None:
+            y_best = above_found
+        elif not top:
             _unused, t_bot, b_top, b_bot = bounds if bounds else (0, staff.top, staff.bottom, staff.bottom)
             gap_top, gap_bot = t_bot + int(s * 0.5), b_top - int(s * 0.5)
             if gap_top >= gap_bot:
@@ -920,7 +1256,7 @@ def _render_group(vis, black, evs, staff, top, s, scale, mid_y=0, bounds=None, o
                 t, b = stack_bounds(ay, -1)
                 return t >= gap_top and b <= gap_bot
 
-            y_best, dir_sign = y_row, -1
+            need_right = False
             if in_gap(y_best) and grp_clear(y_best, x_off, dir_sign):
                 pass
             else:
@@ -956,28 +1292,24 @@ def _render_group(vis, black, evs, staff, top, s, scale, mid_y=0, bounds=None, o
                     compat_y, compat_dir = y_best, dir_sign
 
                     def below_staff_clear(ay):
-                        top, bottom = stack_bounds(ay, 1)
-                        return top >= b_bot + clearance and bottom < H and grp_clear(ay, x_off, 1)
+                        top, bottom = stack_bounds(ay, -1)
+                        return (
+                            top >= b_bot + clearance
+                            and bottom <= H
+                            and grp_clear(ay, x_off, -1)
+                        )
 
-                    cand0 = b_bot + clearance + th // 2 + 2
-                    max_base = H - 2 - (len(members) - 1) * step - members[-1][7]
-                    y_best, dir_sign = cand0, 1
+                    zero_top, zero_bottom = stack_bounds(0, -1)
+                    cand0 = b_bot + clearance - zero_top
+                    max_base = H - zero_bottom
+                    y_best, dir_sign = cand0, -1
                     placed = False
-                    if b_bot + clearance <= max_base:
+                    if cand0 <= max_base:
                         for cand in range(cand0, max_base + 1, 2):
                             if below_staff_clear(cand):
                                 y_best = cand
                                 placed = True
                                 break
-                        if not placed:
-                            for k in range(1, limit + 1):
-                                cand = cand0 + 2 * k
-                                if cand > max_base:
-                                    break
-                                if below_staff_clear(cand):
-                                    y_best = cand
-                                    placed = True
-                                    break
                     if not placed:
                         y_best, dir_sign = compat_y, compat_dir
                         need_right = True
@@ -985,58 +1317,43 @@ def _render_group(vis, black, evs, staff, top, s, scale, mid_y=0, bounds=None, o
         # 上下区域都不够时：放在音符右侧（要求右侧无其他谱面符号/已标注数字）
         if need_right or not grp_clear(y_best, x_off, dir_sign):
             compat_y, compat_dir, compat_x_off = y_best, dir_sign, x_off
-            xr = int(s * 1.8)                                     # 音符头右侧偏移
             cy = (top_head_y + lowest_head_y) / 2.0               # 和弦纵向中心
             base0 = int(round(cy + (len(members) - 1) * step / 2.0))  # 数字列中心对齐和弦中心
 
-            def right_clear(ay):
+            def right_clear(ay, xr):
                 for i, (h, x, tw, th, ptw, pth, to, bo, re) in enumerate(members):
-                    if x + xr + re + 2 >= W:
+                    if x + xr + re + 2 > W:
                         return False
                     if _box_overlaps(black, occupied, H, W, x + xr, re,
                                      ay - i * step, to, bo):
                         return False
                 return True
 
-            def right_content_blocked(ay):
-                """Right lane blocked by score ink or prior digits (not mere image bounds)."""
-                for i, (h, x, tw, th, ptw, pth, to, bo, re) in enumerate(members):
-                    yy = ay - i * step
-                    y0, y1 = yy - to, yy + bo
-                    x0, x1 = x + xr - 2, x + xr + re + 2
-                    if x0 >= W or x1 <= 0:
-                        continue
-                    cy0, cy1 = max(0, y0), min(H, y1)
-                    cx0, cx1 = max(0, x0), min(W, x1)
-                    if cy1 <= cy0 or cx1 <= cx0:
-                        continue
-                    if (black[cy0:cy1, cx0:cx1] > 0).any() or occupied[cy0:cy1, cx0:cx1].any():
-                        return True
-                return False
-
             placed_right = False
-            if right_clear(base0):
-                x_off = xr
-                y_best = base0
-                dir_sign = -1
-                placed_right = True
-            elif not right_content_blocked(base0):
-                base = base0
-                for k in range(1, limit + 1):
-                    hit = None
-                    for sgn in (1, -1):
-                        cand = base0 + sgn * k
-                        if 0 <= cand < H and right_clear(cand):
-                            hit = cand
+            first_x_off = int(s * 1.8)
+            x_step = max(1, int(s * 0.5))
+            for xr in range(first_x_off, W + 1, x_step):
+                base = None
+                if right_clear(base0, xr):
+                    base = base0
+                else:
+                    # 每条横向候选道只做有限纵向微调，再继续向右。
+                    for k in range(1, limit + 1):
+                        hit = None
+                        for sgn in (1, -1):
+                            cand = base0 + sgn * k
+                            if 0 <= cand < H and right_clear(cand, xr):
+                                hit = cand
+                                break
+                        if hit is not None:
+                            base = hit
                             break
-                    if hit is not None:
-                        base = hit
-                        break
-                if right_clear(base):
+                if base is not None:
                     x_off = xr
                     y_best = base
                     dir_sign = -1
                     placed_right = True
+                    break
             if not placed_right:
                 y_best, dir_sign, x_off = compat_y, compat_dir, compat_x_off
                 y_best, x_off, dir_sign = _fit_compat_stack(
