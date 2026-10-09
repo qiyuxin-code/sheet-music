@@ -1,0 +1,46 @@
+<view class="wrap">
+  <view class="hero">
+    <text class="eyebrow">SCORE STUDIO · 乐谱工作台</text>
+    <text class="title">让五线谱，更好读。</text>
+    <text class="sub">添加简谱标注，让每一次练习更轻松。</text>
+  </view>
+
+  <view class="panel">
+    <view class="upload-copy"><text class="upload-title">上传你的乐谱</text><text class="upload-hint">相册选择或拍照 · 每次最多 9 张</text></view>
+    <button class="btn primary" bindtap="onChoose" disabled="{{busy}}">选择图片</button>
+    <button class="btn ghost" bindtap="onClear" disabled="{{busy || !items.length}}">清空</button>
+  </view>
+
+  <view class="empty" wx:if="{{!items.length}}"><text class="empty-symbol">1  2  3</text><text class="empty-title">第一份乐谱，从这里开始</text><text class="empty-sub">选择清晰、平整的图片，标注后可预览和保存。</text></view>
+
+  <view class="progress" wx:if="{{busy}}">
+    <view class="spinner"></view>
+    <text class="hint">{{progressHint}}</text>
+  </view>
+
+  <view class="summary" wx:if="{{summary}}">{{summary}}</view>
+
+  <view class="list" wx:if="{{items.length}}">
+    <block wx:for="{{items}}" wx:key="id">
+      <view class="card {{item.status === 'error' ? 'err' : ''}}">
+        <view wx:if="{{item.status === 'ok'}}" class="thumb-wrap" bindtap="onPreview" data-id="{{item.id}}">
+          <image class="thumb" src="{{item.thumbUrl}}" mode="aspectFit" />
+          <text class="zoom-tag">预览</text>
+        </view>
+        <view class="meta">
+          <text class="fname">{{item.name}}</text>
+          <text class="st {{item.status}}">{{item.statusText}}</text>
+          <view class="ops" wx:if="{{item.status === 'ok'}}">
+            <button size="mini" bindtap="onPreview" data-id="{{item.id}}">放大</button>
+            <button size="mini" bindtap="onSave" data-id="{{item.id}}">保存相册</button>
+          </view>
+          <text wx:if="{{item.error}}" class="errtxt">{{item.error}}</text>
+        </view>
+      </view>
+    </block>
+  </view>
+
+  <view class="foot">
+    <text class="tip">大谱表上行蓝字在上方，下行绿字在下方。自动标注请结合原谱核对。</text>
+  </view>
+</view>

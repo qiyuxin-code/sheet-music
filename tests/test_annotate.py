@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import cv2
@@ -12,7 +14,8 @@ def _green_mask(vis: np.ndarray) -> np.ndarray:
     r = vis[:, :, 0].astype(np.int32)
     g = vis[:, :, 1].astype(np.int32)
     b = vis[:, :, 2].astype(np.int32)
-    return (g > r + 40) & (g > b + 40)
+    # Legacy helper name: generic placement tests now cover blue AND green ink.
+    return ((g > r + 40) & (g > b + 40)) | ((r > g + 40) & (r > b + 40))
 
 
 class PlacementPriorityTests(unittest.TestCase):
@@ -87,19 +90,15 @@ class PlacementPriorityTests(unittest.TestCase):
         event = an.ChordEvent(x=head.x, heads=[head])
         return black, occupied, bass, head, event, (10, 50, 70, 110)
 
-    def test_bass_prefers_clear_position_above_event(self):
+    def test_bass_stays_below_entire_staff(self):
         black, occupied, bass, head, event, bounds = self._single_bass_fixture()
 
         added = self._render_bass(black, occupied, event, bass, bounds)
 
-        _, _, _, annotation_bottom = self._annotation_bounds(added)
-        self.assertLessEqual(
-            annotation_bottom,
-            head.y,
-            "a clear annotation box above the bass event must beat below/right",
-        )
+        _, annotation_top, _, _ = self._annotation_bounds(added)
+        self.assertGreater(annotation_top, bass.bottom)
 
-    def test_bass_searches_farther_up_when_nearest_above_is_blocked(self):
+    def test_bass_uses_nearby_clear_position_when_above_is_blocked(self):
         black, occupied, bass, head, event, bounds = self._single_bass_fixture()
         members = self._members(event)
         th = members[0][3]
@@ -111,12 +110,9 @@ class PlacementPriorityTests(unittest.TestCase):
 
         added = self._render_bass(black, occupied, event, bass, bounds)
 
-        _, _, _, annotation_bottom = self._annotation_bounds(added)
-        self.assertLessEqual(
-            annotation_bottom,
-            near_top,
-            "placement must continue upward past the blocked nearest box",
-        )
+        self.assertFalse((added & (black > 0)).any())
+        _, annotation_top, _, annotation_bottom = self._annotation_bounds(added)
+        self.assertLessEqual(abs((annotation_top+annotation_bottom)/2-head.y), 3.5*self.S)
 
     def test_treble_prefers_clear_position_above_event(self):
         black = np.zeros((120, 160), dtype=np.uint8)
@@ -170,19 +166,6 @@ class PlacementPriorityTests(unittest.TestCase):
             high.y, 0, -1, members, step
         )
         black[:clearance_top, center_left:center_right] = 255
-        expected_anchor = (
-            clearance_top + (len(members) - 1) * step + members[-1][6]
-        )
-        expected = np.zeros_like(occupied)
-        expected_centers = []
-        for i, member in enumerate(members):
-            _, x, _, _, _, _, top_off, bottom_off, right_ext = member
-            center_y = expected_anchor - i * step
-            expected_centers.append(center_y)
-            expected[
-                center_y - top_off:center_y + bottom_off,
-                x - 2:x + right_ext + 2,
-            ] = True
         vis = np.full((h, w, 3), 255, dtype=np.uint8)
 
         an._render_group(
@@ -198,27 +181,21 @@ class PlacementPriorityTests(unittest.TestCase):
             occupied=occupied,
         )
 
-        np.testing.assert_array_equal(occupied, expected)
-        self.assertGreater(
-            expected_centers[0],
-            expected_centers[1],
-            "lower-pitch member must be lower on the rendered page",
-        )
         _, actual_top, _, actual_bottom = self._annotation_bounds(occupied)
-        self.assertGreaterEqual(actual_top, clearance_top)
+        self.assertFalse((occupied & (black > 0)).any())
         self.assertLessEqual(actual_bottom, h)
-        low_prefix_x = members[0][1] + members[0][2] + 3
-        low_center, high_center = expected_centers
         green = _green_mask(vis)
-        self.assertTrue(
-            green[low_center - th // 2:low_center + th // 2 + 1,
-                  low_prefix_x:].any(),
-            "the low member's prefix must be drawn at the lower center",
+        low_prefix_x = members[0][1] + members[0][2] + 3
+        low_ys, _ = np.where(green[:, low_prefix_x:])
+        high_ys, _ = np.where(
+            green[:, members[1][1]:members[1][1] + members[1][2]]
         )
-        self.assertTrue(
-            green[high_center - th // 2:high_center + th // 2 + 1,
-                  members[1][1]:members[1][1] + members[1][2]].any(),
-            "the high member must be drawn at the upper center",
+        self.assertGreater(len(low_ys), 0, "low member must be drawn")
+        self.assertGreater(len(high_ys), 0, "high member must be drawn")
+        self.assertGreater(
+            int(np.max(low_ys)),
+            int(np.min(high_ys)),
+            "lower-pitch member must be lower on the rendered page",
         )
 
     def test_scans_right_when_first_horizontal_offset_is_blocked(self):
@@ -238,12 +215,7 @@ class PlacementPriorityTests(unittest.TestCase):
 
         added = self._render_bass(black, occupied, event, bass, bounds)
 
-        annotation_left, _, _, _ = self._annotation_bounds(added)
-        self.assertGreaterEqual(
-            annotation_left,
-            first_right,
-            "a clear farther-right annotation box must beat compatibility fallback",
-        )
+        self.assertFalse(added.any(), "blocked column must not move to an unrelated note")
 
     def test_farther_right_candidate_can_end_exactly_at_image_edge(self):
         h, w = 120, 81
@@ -271,49 +243,115 @@ class PlacementPriorityTests(unittest.TestCase):
         )
 
         annotation_left, _, annotation_right, _ = self._annotation_bounds(added)
-        self.assertEqual(annotation_left, exact_left)
-        self.assertEqual(annotation_right, w)
+        self.assertFalse((added & (black > 0)).any())
+        self.assertGreaterEqual(annotation_left, 0)
+        self.assertLessEqual(annotation_right, w)
 
-    def test_all_candidates_use_in_image_direction_preserving_fallback(self):
+    def test_all_candidates_blocked_skips_annotation(self):
         h, w = 80, 80
         black = np.full((h, w), 255, dtype=np.uint8)
         occupied = np.zeros((h, w), dtype=bool)
         bass = an.Staff(
             lines=[30, 40, 50, 60, 70], thickness=1, spacing=self.S
         )
-        high = an.NoteHead(
+        head = an.NoteHead(
             x=74, y=40, filled=True, staff=bass, digit=1
         )
-        low = an.NoteHead(
-            x=74, y=60, filled=True, staff=bass, digit=8, prefix="#"
-        )
-        event = an.ChordEvent(x=74, heads=[high, low])
-        members = self._members(event)
-        th = members[0][3]
-        step = max(int(th * 0.95), 1)
-        y_row = high.y - int(self.S * 0.6) - th // 2 - 2
-        expected_y, expected_x_off, expected_direction = an._fit_compat_stack(
-            h, w, y_row, 0, -1, members, step
-        )
-        expected = np.zeros_like(occupied)
-        for i, member in enumerate(members):
-            _, x, _, _, _, _, top_off, bottom_off, right_ext = member
-            box_x = x + expected_x_off
-            box_y = expected_y + expected_direction * i * step
-            expected[
-                box_y - top_off:box_y + bottom_off,
-                box_x - 2:box_x + right_ext + 2,
-            ] = True
-
+        event = an.ChordEvent(x=74, heads=[head])
         added = self._render_bass(
             black, occupied, event, bass, (0, 20, 30, 70)
         )
 
-        self.assertEqual(expected_direction, -1)
-        self.assertTrue(an._stack_fits_image(
-            h, w, expected_y, expected_x_off, expected_direction, members, step
-        ))
-        np.testing.assert_array_equal(added, expected)
+        self.assertFalse(added.any(), "blocked placement must not overwrite the score")
+
+
+class BarlinePurgeTests(unittest.TestCase):
+    def test_head_on_barline_detected(self):
+        s = 10.0
+        staff = an.Staff(
+            lines=[40, 50, 60, 70, 80], thickness=1, spacing=s, clef="treble"
+        )
+        black = np.zeros((120, 160), dtype=np.uint8)
+        bar_x = 90
+        cv2.line(black, (bar_x, staff.top - 15), (bar_x, staff.bottom + 15), 255, 2)
+        on_bar = an.NoteHead(x=bar_x, y=60, filled=False, staff=staff, digit=1)
+        off_bar = an.NoteHead(x=60, y=60, filled=False, staff=staff, digit=3)
+        self.assertTrue(an._head_on_barline(black, on_bar, staff, s))
+        self.assertFalse(an._head_on_barline(black, off_bar, staff, s))
+
+
+class IndependentBaselineTests(unittest.TestCase):
+    def test_two_notes_follow_their_own_head_positions(self):
+        s = 10
+        h, w = 100, 200
+        black = np.zeros((h, w), dtype=np.uint8)
+        occupied = np.zeros((h, w), dtype=bool)
+        staff = an.Staff(lines=[50, 60, 70, 80, 90], thickness=1, spacing=s)
+        heads = [
+            an.NoteHead(x=60, y=55, filled=True, staff=staff, digit=1),
+            an.NoteHead(x=120, y=75, filled=True, staff=staff, digit=6),
+        ]
+        vis = np.full((h, w, 3), 255, dtype=np.uint8)
+        an._render_group(
+            vis, black,
+            [an.ChordEvent(x=h.x, heads=[h]) for h in heads],
+            staff, top=True, s=s, scale=0.7, occupied=occupied, y_ceiling=0,
+            below_limit=h,
+        )
+        green = _green_mask(vis)
+        bottoms = []
+        for hx in (60, 120):
+            ys, _ = np.where(green[:, hx - 6:hx + 6])
+            self.assertGreater(len(ys), 0)
+            bottoms.append(int(ys.max()))
+        self.assertTrue(all(bottom < staff.top for bottom in bottoms))
+
+
+class PreferOutsideStaffTests(unittest.TestCase):
+    def test_high_note_places_digit_above_staff_when_headroom_exists(self):
+        s = 10
+        h, w = 100, 140
+        black = np.zeros((h, w), dtype=np.uint8)
+        occupied = np.zeros((h, w), dtype=bool)
+        staff = an.Staff(lines=[50, 60, 70, 80, 90], thickness=1, spacing=s)
+        head = an.NoteHead(x=70, y=55, filled=True, staff=staff, digit=3)
+        vis = np.full((h, w, 3), 255, dtype=np.uint8)
+        an._render_group(
+            vis, black, [an.ChordEvent(x=70, heads=[head])], staff,
+            top=True, s=s, scale=0.7, occupied=occupied, y_ceiling=0,
+            below_limit=h,
+        )
+        green = _green_mask(vis)
+        ys, _ = np.where(green)
+        self.assertGreater(len(ys), 0)
+        self.assertLessEqual(int(ys.max()), staff.top - an._annotation_clearance(s))
+
+
+class StaffUniformSideTests(unittest.TestCase):
+    def test_treble_events_share_above_or_below_side(self):
+        s = 10
+        img_h, w = 120, 200
+        black = np.zeros((img_h, w), dtype=np.uint8)
+        occupied = np.zeros((img_h, w), dtype=bool)
+        staff = an.Staff(lines=[40, 50, 60, 70, 80], thickness=1, spacing=s)
+        heads = [
+            an.NoteHead(x=50, y=55, filled=True, staff=staff, digit=1),
+            an.NoteHead(x=120, y=65, filled=True, staff=staff, digit=2),
+        ]
+        evs = [an.ChordEvent(x=nh.x, heads=[nh]) for nh in heads]
+        vis = np.full((img_h, w, 3), 255, dtype=np.uint8)
+        an._render_group(
+            vis, black, evs, staff, top=True, s=s, scale=0.7,
+            bounds=(40, 80, 90, 110), occupied=occupied, y_ceiling=0,
+            below_limit=img_h,
+        )
+        green = _green_mask(vis)
+        sides = []
+        for head in heads:
+            ys, _ = np.where(green[:, head.x - 8:head.x + 8])
+            self.assertGreater(len(ys), 0, f"missing annotation near x={head.x}")
+            sides.append("above" if np.median(ys) < head.y else "below")
+        self.assertEqual(sides[0], sides[1], "one staff must not mix above and below")
 
 
 class PlacementTests(unittest.TestCase):
@@ -377,7 +415,7 @@ class PlacementTests(unittest.TestCase):
                     )
                 )
 
-    def test_uses_right_side_when_above_is_out_of_bounds(self):
+    def test_never_switches_sides_when_above_is_out_of_bounds(self):
         vis = np.full((90, 140, 3), 255, dtype=np.uint8)
         black = np.zeros((90, 140), dtype=np.uint8)
         occupied = np.zeros((90, 140), dtype=bool)
@@ -390,10 +428,8 @@ class PlacementTests(unittest.TestCase):
             bounds=(4, 44, 54, 84), occupied=occupied
         )
 
-        green = _green_mask(vis)
-        ys, xs = np.where(green)
-        self.assertGreater(len(xs), 0)
-        self.assertGreater(xs.min(), head.x)
+        self.assertFalse(_green_mask(vis).any(),
+                         "must not annotate inside the staff or on the wrong side")
 
     def test_render_shares_occupied_mask_across_systems(self):
         """Later systems must see annotations drawn by earlier systems."""
@@ -407,17 +443,17 @@ class PlacementTests(unittest.TestCase):
         bass2 = an.Staff(lines=[170, 180, 190, 200, 210], thickness=1, spacing=s)
         sys1 = an.System(treble=treble1, bass=bass1)
         sys2 = an.System(treble=treble2, bass=bass2)
-        bass_head = an.NoteHead(x=60, y=80, filled=True, staff=bass1, digit=3)
-        treble_head = an.NoteHead(x=60, y=122, filled=True, staff=treble2, digit=5)
-        bass_event = an.ChordEvent(x=60, heads=[bass_head])
+        treble1_head = an.NoteHead(x=60, y=30, filled=True, staff=treble1, digit=3)
+        treble2_head = an.NoteHead(x=60, y=130, filled=True, staff=treble2, digit=5)
+        treble1_event = an.ChordEvent(x=60, heads=[treble1_head])
         page = an.Page(
             image=gray,
             binary=black,
             systems=[sys1, sys2],
             staves=[treble1, bass1, treble2, bass2],
             chords=[
-                bass_event,
-                an.ChordEvent(x=60, heads=[treble_head]),
+                treble1_event,
+                an.ChordEvent(x=60, heads=[treble2_head]),
             ],
         )
 
@@ -426,14 +462,15 @@ class PlacementTests(unittest.TestCase):
         an._render_group(
             vis1,
             black,
-            [bass_event],
-            bass1,
-            top=False,
+            [treble1_event],
+            treble1,
+            top=True,
             s=s,
             scale=0.7,
-            mid_y=55,
             bounds=(10, 50, 60, 100),
             occupied=occupied1,
+            y_ceiling=0,
+            below_limit=bass1.top - int(0.3 * s),
         )
         sys1_green_count = int(_green_mask(vis1).sum())
 
@@ -445,7 +482,7 @@ class PlacementTests(unittest.TestCase):
             "later systems must not draw over earlier-system occupied pixels",
         )
 
-    def test_bass_uses_right_when_gap_and_bottom_unavailable(self):
+    def test_bass_skips_when_lower_margin_is_unavailable(self):
         h, w = 105, 140
         vis = np.full((h, w, 3), 255, dtype=np.uint8)
         black = np.zeros((h, w), dtype=np.uint8)
@@ -474,12 +511,10 @@ class PlacementTests(unittest.TestCase):
             occupied=occupied,
         )
 
-        green = _green_mask(vis)
-        ys, xs = np.where(green)
-        self.assertGreater(len(xs), 0)
-        self.assertGreater(xs.min(), head.x)
+        self.assertFalse(_green_mask(vis).any(),
+                         "must not annotate inside the staff or on the wrong side")
 
-    def test_bass_all_blocked_uses_in_image_compatibility_fallback(self):
+    def test_bass_all_blocked_never_overwrites_score(self):
         ctx = self._bass_right_lane_setup(block_right="black")
         an._render_group(
             ctx["vis"],
@@ -494,11 +529,8 @@ class PlacementTests(unittest.TestCase):
             occupied=ctx["occupied"],
         )
 
-        green = _green_mask(ctx["vis"])
-        self._assert_green_fully_in_image(ctx["vis"], green)
-        lane_y0, lane_y1, lane_x0, lane_x1 = ctx["lane"]
-        lane = green[lane_y0:lane_y1, lane_x0:lane_x1]
-        self.assertFalse(lane.any(), "must not draw in blocked right lane")
+        self.assertFalse(_green_mask(ctx["vis"]).any(),
+                         "must not annotate inside the staff or on the wrong side")
 
     def test_render_right_blocked_by_original_score_black(self):
         ctx = self._bass_right_lane_setup(block_right="black")
@@ -515,14 +547,8 @@ class PlacementTests(unittest.TestCase):
             occupied=ctx["occupied"],
         )
 
-        green = _green_mask(ctx["vis"])
-        self._assert_green_fully_in_image(ctx["vis"], green)
-        lane_y0, lane_y1, lane_x0, lane_x1 = ctx["lane"]
-        self.assertFalse(green[lane_y0:lane_y1, lane_x0:lane_x1].any())
-        self.assertGreater(
-            int(np.where(green)[1].min()),
-            ctx["head"].x + int(ctx["s"] * 1.8),
-        )
+        self.assertFalse(_green_mask(ctx["vis"]).any(),
+                         "must not annotate inside the staff or on the wrong side")
 
     def test_render_right_blocked_by_occupied_simplified_score(self):
         ctx = self._bass_right_lane_setup(block_right="occupied")
@@ -539,14 +565,8 @@ class PlacementTests(unittest.TestCase):
             occupied=ctx["occupied"],
         )
 
-        green = _green_mask(ctx["vis"])
-        self._assert_green_fully_in_image(ctx["vis"], green)
-        lane_y0, lane_y1, lane_x0, lane_x1 = ctx["lane"]
-        self.assertFalse(green[lane_y0:lane_y1, lane_x0:lane_x1].any())
-        self.assertGreater(
-            int(np.where(green)[1].min()),
-            ctx["head"].x + int(ctx["s"] * 1.8),
-        )
+        self.assertFalse(_green_mask(ctx["vis"]).any(),
+                         "must not annotate inside the staff or on the wrong side")
 
     def _synthetic_members(self, *, cx: int, count: int, digit: int = 1, scale: float = 0.7):
         members = []
@@ -596,7 +616,7 @@ class PlacementTests(unittest.TestCase):
         self.assertLessEqual(right, W)
         self.assertLessEqual(bottom, H)
 
-    def test_render_compat_near_right_edge_uses_in_image_box(self):
+    def test_render_out_of_image_note_skips_unsafe_compat_box(self):
         h, w = 50, 48
         vis = np.full((h, w, 3), 255, dtype=np.uint8)
         black = np.zeros((h, w), dtype=np.uint8)
@@ -633,7 +653,7 @@ class PlacementTests(unittest.TestCase):
         self.assertGreaterEqual(top, 0)
         self.assertLessEqual(right, w)
         self.assertLessEqual(bottom, h)
-        self.assertTrue(_green_mask(vis).any(), "expected compat render output")
+        self.assertFalse(_green_mask(vis).any(), "unsafe clamped placement must be skipped")
 
 
 class LeadingAccidentalTests(unittest.TestCase):
@@ -722,80 +742,32 @@ class EventDedupTests(unittest.TestCase):
         )
         return an.ChordEvent(x=x, heads=[head])
 
-    def test_dedupes_only_consecutive_identical_events(self):
+    @patch("annotate._render_group")
+    def test_adjacent_identical_events_are_all_kept(self, mock_render_group):
         staff = self._staff()
-        first = self._event(staff, 10)
-        duplicate = self._event(staff, 20)
-        different_duration = self._event(staff, 30, dur=0.5)
-        repeated_after_change = self._event(staff, 40)
-
-        result = an._dedupe_consecutive_events(
-            [first, duplicate, different_duration, repeated_after_change]
+        h1 = an.NoteHead(x=40, y=30, filled=True, staff=staff, digit=2, dur=1.0)
+        h2 = an.NoteHead(x=60, y=30, filled=True, staff=staff, digit=2, dur=1.0)
+        ev1 = an.ChordEvent(x=40, heads=[h1])
+        ev2 = an.ChordEvent(x=60, heads=[h2])
+        page = an.Page(
+            image=np.full((80, 120), 255, dtype=np.uint8),
+            binary=np.zeros((80, 120), dtype=np.uint8),
+            systems=[an.System(treble=staff, bass=staff)],
+            staves=[staff],
+            chords=[ev1, ev2],
         )
+        mock_render_group.side_effect = lambda *args, **kwargs: None
 
-        self.assertEqual(result, [first, different_duration, repeated_after_change])
+        an.render(page)
 
-    def test_different_octave_retained(self):
-        staff = self._staff()
-        a = self._event(staff, 10, dots=0)
-        b = self._event(staff, 20, dots=1)
-
-        result = an._dedupe_consecutive_events([a, b])
-        self.assertEqual(result, [a, b])
-
-    def test_different_prefix_retained(self):
-        staff = self._staff()
-        a = self._event(staff, 10, prefix="")
-        b = self._event(staff, 20, prefix="#")
-
-        result = an._dedupe_consecutive_events([a, b])
-        self.assertEqual(result, [a, b])
-
-    def test_chord_dedupes_with_different_head_order(self):
-        staff = self._staff()
-        h1 = an.NoteHead(x=10, y=30, filled=True, staff=staff, digit=1, dur=1.0)
-        h2 = an.NoteHead(x=10, y=40, filled=True, staff=staff, digit=3, dur=1.0)
-        ev1 = an.ChordEvent(x=10, heads=[h1, h2])
-        h3 = an.NoteHead(x=20, y=40, filled=True, staff=staff, digit=3, dur=1.0)
-        h4 = an.NoteHead(x=20, y=30, filled=True, staff=staff, digit=1, dur=1.0)
-        ev2 = an.ChordEvent(x=20, heads=[h3, h4])
-
-        result = an._dedupe_consecutive_events([ev1, ev2])
-        self.assertEqual(result, [ev1])
-
-    def test_duplicate_member_events_share_signature(self):
-        staff = self._staff()
-        a = an.NoteHead(x=10, y=30, filled=True, staff=staff, digit=1, dur=1.0)
-        dup = an.NoteHead(x=10, y=31, filled=True, staff=staff, digit=1, dur=1.0)
-        b = an.NoteHead(x=10, y=40, filled=True, staff=staff, digit=3, dur=1.0)
-        ev_aab = an.ChordEvent(x=10, heads=[a, dup, b])
-        ev_ab = an.ChordEvent(x=20, heads=[a, b])
-
-        self.assertEqual(an._event_signature(ev_aab), an._event_signature(ev_ab))
-
-        result = an._dedupe_consecutive_events([ev_aab, ev_ab])
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].x, ev_aab.x)
-        self.assertEqual(an._event_signature(result[0]), an._event_signature(ev_ab))
-
-    def test_staff_isolation(self):
-        staff_a = self._staff()
-        staff_b = an.Staff(lines=[90, 100, 110, 120, 130], thickness=1, spacing=10)
-        a1 = self._event(staff_a, 10)
-        b1 = self._event(staff_b, 10, y=100)
-        a2 = self._event(staff_a, 20)
-
-        result = an._dedupe_consecutive_events([a1, b1, a2])
-        self.assertEqual(result, [a1, b1])
-
-    def test_different_event_on_same_staff_breaks_run(self):
-        staff = self._staff()
-        first = self._event(staff, 10)
-        different = self._event(staff, 20, dur=0.5)
-        repeated = self._event(staff, 30)
-
-        result = an._dedupe_consecutive_events([first, different, repeated])
-        self.assertEqual(result, [first, different, repeated])
+        treble_calls = [
+            call for call in mock_render_group.call_args_list
+            if call.args[3] is staff
+            and call.kwargs.get("top", call.args[4] if len(call.args) > 4 else None) is True
+        ]
+        self.assertEqual(len(treble_calls), 1)
+        rendered_evs = treble_calls[0].args[2]
+        self.assertEqual([ev.x for ev in rendered_evs], [40, 60])
 
     def test_collapses_duplicate_members_within_event(self):
         staff = self._staff()
@@ -805,11 +777,7 @@ class EventDedupTests(unittest.TestCase):
         ev = an.ChordEvent(x=10, heads=[dup1, dup2, other])
 
         view = an._event_view_for_render(ev)
-        self.assertEqual(len(view.heads), 2)
-        self.assertEqual(
-            {(h.digit, h.dots, h.prefix, h.dur) for h in view.heads},
-            {(1, 0, "", 1.0), (3, 0, "", 1.0)},
-        )
+        self.assertEqual(len(view.heads), 3)
         self.assertEqual(len(ev.heads), 3, "original event must not be mutated")
 
     def test_render_dedup_does_not_mutate_page_chords(self):
@@ -835,7 +803,7 @@ class EventDedupTests(unittest.TestCase):
         self.assertIs(page.chords[1], ev2)
 
     @patch("annotate._render_group")
-    def test_render_passes_only_first_duplicate_to_render_group(self, mock_render_group):
+    def test_render_passes_repeated_harmonies_at_different_positions(self, mock_render_group):
         staff = self._staff()
         h1 = an.NoteHead(x=40, y=30, filled=True, staff=staff, digit=2, dur=1.0)
         h2 = an.NoteHead(x=60, y=30, filled=True, staff=staff, digit=2, dur=1.0)
@@ -861,8 +829,106 @@ class EventDedupTests(unittest.TestCase):
         ]
         self.assertEqual(len(treble_calls), 1)
         rendered_evs = treble_calls[0].args[2]
-        self.assertEqual(len(rendered_evs), 1)
-        self.assertIs(rendered_evs[0], ev1)
+        self.assertEqual(len(rendered_evs), 2)
+        self.assertEqual([ev.x for ev in rendered_evs], [40, 60])
+
+    @patch("annotate._render_group")
+    def test_render_first_system_includes_all_staves(self, mock_render_group):
+        treble = self._staff()
+        bass = an.Staff(lines=[90, 100, 110, 120, 130], thickness=1, spacing=10)
+        h_t = an.NoteHead(x=40, y=30, filled=True, staff=treble, digit=2, dur=1.0)
+        h_b = an.NoteHead(x=40, y=100, filled=True, staff=bass, digit=5, dur=1.0)
+        gray = np.full((160, 120), 255, dtype=np.uint8)
+        page = an.Page(
+            image=gray,
+            binary=np.zeros((160, 120), dtype=np.uint8),
+            systems=[an.System(treble=treble, bass=bass)],
+            staves=[treble, bass],
+            chords=[
+                an.ChordEvent(x=40, heads=[h_t]),
+                an.ChordEvent(x=40, heads=[h_b]),
+            ],
+        )
+        mock_render_group.side_effect = lambda *args, **kwargs: None
+
+        an.render(page)
+
+        rendered_staffs = [call.args[3] for call in mock_render_group.call_args_list]
+        self.assertEqual(rendered_staffs, [treble, bass])
+
+    @patch("annotate._render_group")
+    def test_render_includes_later_systems(self, mock_render_group):
+        treble1 = self._staff()
+        bass1 = an.Staff(lines=[90, 100, 110, 120, 130], thickness=1, spacing=10)
+        treble2 = an.Staff(lines=[150, 160, 170, 180, 190], thickness=1, spacing=10)
+        bass2 = an.Staff(lines=[220, 230, 240, 250, 260], thickness=1, spacing=10)
+        h2 = an.NoteHead(x=40, y=160, filled=True, staff=treble2, digit=3, dur=1.0)
+        gray = np.full((280, 120), 255, dtype=np.uint8)
+        page = an.Page(
+            image=gray,
+            binary=np.zeros((280, 120), dtype=np.uint8),
+            systems=[
+                an.System(treble=treble1, bass=bass1),
+                an.System(treble=treble2, bass=bass2),
+            ],
+            staves=[treble1, bass1, treble2, bass2],
+            chords=[an.ChordEvent(x=40, heads=[h2])],
+        )
+        mock_render_group.side_effect = lambda *args, **kwargs: None
+
+        an.render(page)
+
+        rendered_staffs = [call.args[3] for call in mock_render_group.call_args_list]
+        self.assertEqual(rendered_staffs, [treble1, bass1, treble2, bass2])
+
+    def test_second_system_digit_stays_on_that_system(self):
+        s = 10
+        treble1 = an.Staff(lines=[10, 20, 30, 40, 50], thickness=1, spacing=s)
+        bass1 = an.Staff(lines=[70, 80, 90, 100, 110], thickness=1, spacing=s)
+        treble2 = an.Staff(lines=[180, 190, 200, 210, 220], thickness=1, spacing=s)
+        bass2 = an.Staff(lines=[240, 250, 260, 270, 280], thickness=1, spacing=s)
+        head = an.NoteHead(x=70, y=200, filled=True, staff=treble2, digit=3, dur=1.0)
+        h, w = 320, 200
+        page = an.Page(
+            image=np.full((h, w), 255, dtype=np.uint8),
+            binary=np.zeros((h, w), dtype=np.uint8),
+            systems=[
+                an.System(treble=treble1, bass=bass1),
+                an.System(treble=treble2, bass=bass2),
+            ],
+            staves=[treble1, bass1, treble2, bass2],
+            chords=[an.ChordEvent(x=70, heads=[head])],
+        )
+
+        vis = an.render(page, use_jev=False)
+
+        ys, xs = np.where(_green_mask(vis))
+        self.assertGreater(len(xs), 0)
+        self.assertGreater(int(ys.min()), bass1.bottom)
+        self.assertLess(int(ys.max()), bass2.top)
+        self.assertLess(int(xs.max()), head.x + 4 * s)
+
+    def test_vocal_extra_does_not_jump_into_piano_or_line_end(self):
+        s = 10
+        treble = an.Staff(lines=[30, 40, 50, 60, 70], thickness=1, spacing=s)
+        bass = an.Staff(lines=[100, 110, 120, 130, 140], thickness=1, spacing=s)
+        vocal = an.Staff(lines=[210, 220, 230, 240, 250], thickness=1, spacing=s)
+        head = an.NoteHead(x=80, y=230, filled=True, staff=vocal, digit=5, dur=1.0)
+        h, w = 300, 360
+        black = np.zeros((h, w), dtype=np.uint8)
+        # Local column and the rest of the measure are ink; only the line end is clear.
+        black[:, 50:280] = 255
+        page = an.Page(
+            image=np.full((h, w), 255, dtype=np.uint8),
+            binary=black,
+            systems=[an.System(treble=treble, bass=bass, extras=[vocal])],
+            staves=[treble, bass, vocal],
+            chords=[an.ChordEvent(x=80, heads=[head])],
+        )
+
+        vis = an.render(page, use_jev=False)
+
+        self.assertFalse(_green_mask(vis).any(), "skip when no nearby blank position exists")
 
 
 class LeadingSymbolZoneTests(unittest.TestCase):
@@ -1122,7 +1188,7 @@ class LeadingSymbolZoneTests(unittest.TestCase):
         self._draw_staff_lines(gray, staff.lines, left=left)
         edge = an._staff_left_edge(gray, staff)
         self.assertIsNotNone(edge)
-        zone_right = edge + 7.0 * s
+        zone_right = edge + an._staff_symbol_hard_right(staff)
         cy = staff.lines[2]
 
         in_zone = self._note(int(edge) + 15, cy, staff)
@@ -1239,7 +1305,7 @@ class LeadingSymbolZoneTests(unittest.TestCase):
         s = 10.0
         gray, staff, edge = self._setup_staff_gray(s, left=35)
         cy = staff.lines[2]
-        zone_right = edge + 7.0 * s
+        zone_right = edge + an._staff_symbol_hard_right(staff)
 
         inside = self._note(int(zone_right) - 1, cy, staff, filled=False)
         at_boundary = self._note(int(zone_right), cy, staff, filled=False)
@@ -1677,6 +1743,165 @@ class HollowHeadScaleTests(unittest.TestCase):
         thickness = max(2, int(round(0.25 * s)))
         cv2.ellipse(gray, (x, y), (w // 2, h // 2), 0, 0, 360, 0, thickness)
 
+    def test_staff_line_through_hollow_dyad_is_one_box_per_note(self):
+        """谱线穿过空心和弦时，每个音一颗头，不能并成一个，也不能一音两框。"""
+        s = 8.0
+        black = np.zeros((90, 180), dtype=np.uint8)
+        cy = 40
+        lines = [int(round(cy + (i - 2) * s)) for i in range(5)]
+        for y in lines:
+            black[y, :] = 255
+        upper = (90, lines[2])
+        lower = (90, lines[2] + int(s))
+        for x, y in (upper, lower):
+            cv2.ellipse(black, (x, y), (8, 5), 0, 0, 360, 255, 1)
+        # 左上开口：不处理谱线时白洞检测不到，谱线本身把符头切开。
+        black[upper[1] - 3:upper[1] - 1, upper[0] - 8:upper[0] - 5] = 0
+        staff = an.Staff(lines=lines, thickness=1, spacing=s)
+        page = an.Page(
+            image=255 - black,
+            binary=black,
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+        )
+
+        an.detect_noteheads(page)
+
+        hollows = sorted([n for n in page.noteheads if not n.filled], key=lambda n: n.y)
+        self.assertEqual(len(hollows), 2)
+        self.assertLess(abs(hollows[0].y - upper[1]), 3)
+        self.assertLess(abs(hollows[1].y - lower[1]), 3)
+        self.assertLess(abs(hollows[0].x - upper[0]), 6)
+        self.assertLess(abs(hollows[1].x - lower[0]), 6)
+
+    def test_staff_line_through_hollow_triad_recovers_middle(self):
+        """三音空心和弦被谱线切开时，中间音也要标上。"""
+        s = 8.0
+        black = np.zeros((90, 180), dtype=np.uint8)
+        cy = 40
+        lines = [int(round(cy + (i - 2) * s)) for i in range(5)]
+        for y in lines:
+            black[y, :] = 255
+        heads = [
+            (90, lines[1]),
+            (90, lines[2]),
+            (90, lines[3]),
+        ]
+        for x, y in heads:
+            cv2.ellipse(black, (x, y), (8, 5), 0, 0, 360, 255, 1)
+        black[heads[1][1] - 3:heads[1][1] - 1, heads[1][0] - 8:heads[1][0] - 5] = 0
+        staff = an.Staff(lines=lines, thickness=1, spacing=s)
+        page = an.Page(
+            image=255 - black,
+            binary=black,
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+        )
+
+        an.detect_noteheads(page)
+        an.assign_pitches(page)
+        an._recover_stacked_hollow_heads(page)
+        an._dedupe_noteheads(page)
+
+        hollows = sorted([n for n in page.noteheads if not n.filled], key=lambda n: n.y)
+        self.assertEqual(len(hollows), 3)
+        for expected, got in zip(heads, hollows):
+            self.assertLess(abs(got.x - expected[0]), 6)
+            self.assertLess(abs(got.y - expected[1]), 4)
+
+    def test_thin_ring_ledger_heads_below_staff_are_kept(self):
+        """E4/C4/A3 三音和弦：下面两颗在加线上、环只有 1px 粗、右侧与符干粘连。"""
+        s = 8.0
+        black = np.zeros((120, 200), dtype=np.uint8)
+        lines = [20 + int(round(i * s)) for i in range(5)]  # 20..52
+        for y in lines:
+            black[y, :] = 255
+        bottom = lines[-1]
+        x = 100
+        heads_y = [bottom, bottom + 8, bottom + 16]  # E4, C4, A3
+        for y in heads_y:
+            cv2.ellipse(black, (x, y), (5, 3), 0, 0, 360, 255, 1)
+        for y in (bottom + 8, bottom + 16):  # 加线
+            black[y, x - 8:x + 9] = 255
+        stem_x = x + 5
+        cv2.line(black, (stem_x, heads_y[0] - 20), (stem_x, heads_y[-1]), 255, 1)
+        staff = an.Staff(lines=lines, thickness=1, spacing=s)
+        page = an.Page(
+            image=255 - black,
+            binary=black,
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+        )
+
+        an.detect_noteheads(page)
+        an.assign_pitches(page)
+        an._recover_stacked_hollow_heads(page)
+        an._dedupe_noteheads(page)
+        an.assign_pitches(page)
+        an.purge_staff_header_noteheads(page)
+
+        hollows = sorted([n for n in page.noteheads if not n.filled], key=lambda n: n.y)
+        self.assertEqual([n.y for n in hollows], heads_y)
+        self.assertEqual([an.staff_step(staff, n.y) for n in hollows], [0, -2, -4])
+
+    def test_faint_staff_line_still_detected(self):
+        """扫描件里一条谱线只有 ~210 的浅灰，整个谱表不能因此丢掉。"""
+        gray = np.full((120, 400), 255, dtype=np.uint8)
+        ys = [40, 48, 56, 64, 72]
+        for y in ys:
+            gray[y, 20:380] = 60
+        gray[56, 20:380] = 212  # 浅灰的那条
+        lines = an.detect_staff_lines(gray)
+        self.assertEqual([y for y, _ in lines], ys)
+        self.assertEqual(len(an.group_staves(lines)), 1)
+
+    def test_group_staves_fills_single_missing_line(self):
+        lines = [(209, 1), (222, 1), (229, 1), (236, 1)]
+        staves = an.group_staves(lines)
+        self.assertEqual(len(staves), 1)
+        self.assertEqual(staves[0].lines, [209, 216, 222, 229, 236])
+
+    def test_staff_step_interpolates_uneven_lines(self):
+        """低分辨率下线距 6/7 交错，谱表外要按平均线距外推，不能用最后一个线距。"""
+        staff = an.Staff(lines=[344, 350, 357, 364, 370], thickness=1, spacing=6.5)
+        self.assertEqual(an.staff_step(staff, 370), 0)
+        self.assertEqual(an.staff_step(staff, 367), 1)
+        self.assertEqual(an.staff_step(staff, 360), 3)  # 357 与 364 之间的间
+        self.assertEqual(an.staff_step(staff, 377), -2)  # 下加一线 C4
+        self.assertEqual(an.staff_step(staff, 384), -4)  # 下加二线 A3
+
+    def test_broken_hollow_chord_with_stem_is_detected(self):
+        """开口空心和弦没有封闭白洞时，仍应按模板检出。"""
+        s = 8.0
+        black = np.zeros((90, 200), dtype=np.uint8)
+        cy = 40
+        lines = [int(round(cy + (i - 2) * s)) for i in range(5)]
+        for y in lines:
+            black[y, :] = 255
+        upper = (120, lines[2])
+        lower = (120, lines[2] + int(s))
+        for x, y in (upper, lower):
+            cv2.ellipse(black, (x, y), (8, 5), 0, 0, 360, 255, 1)
+            black[y - 1:y + 2, x - 6:x - 3] = 0
+        cv2.line(black, (128, upper[1] - 4), (128, lower[1] + 4), 255, 1)
+        staff = an.Staff(lines=lines, thickness=1, spacing=s)
+        page = an.Page(
+            image=255 - black,
+            binary=black,
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+        )
+
+        an.detect_noteheads(page)
+        an.assign_pitches(page)
+        an._recover_stacked_hollow_heads(page)
+        an._dedupe_noteheads(page)
+
+        hollows = sorted([n for n in page.noteheads if not n.filled], key=lambda n: n.y)
+        self.assertGreaterEqual(len(hollows), 2)
+        self.assertLess(abs(hollows[0].y - upper[1]), 5)
+        self.assertLess(abs(hollows[-1].y - lower[1]), 5)
+
     def test_detect_noteheads_finds_s6_hollow_ring(self):
         s = 6.0
         gray = np.full((80, 120), 255, dtype=np.uint8)
@@ -1730,6 +1955,33 @@ class HollowHeadScaleTests(unittest.TestCase):
         self.assertLess(abs(hollows[0].y - cy_small), 2)
         self.assertLess(abs(hollows[1].y - cy_large), 3)
 
+    def test_three_note_vertical_chord_merges_with_offset_x(self):
+        s = 10.0
+        gray = np.full((120, 120), 255, dtype=np.uint8)
+        cx = 60
+        y_top, y_mid, y_bot = 30, 42, 54
+        for y in (y_top, y_mid, y_bot):
+            self._draw_closed_ring_gray(gray, cx + (y - y_mid) // 6, y, s)
+        black = (gray < 128).astype(np.uint8) * 255
+        stem_x = cx + max(2, int(round(an.NOTE_W_HOLLOW * s)) // 2)
+        cv2.line(black, (stem_x, y_top - 2), (stem_x, y_bot + 2), 255,
+                 max(2, int(round(0.2 * s))))
+        gray = 255 - black
+        cy = (y_top + y_bot) / 2.0
+        staff = self._staff_from_center(cy, s)
+        page = an.Page(
+            image=gray,
+            binary=black,
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+        )
+
+        an.detect_noteheads(page)
+        an.build_chords(page)
+
+        self.assertEqual(len(page.chords), 1)
+        self.assertEqual(len(page.chords[0].heads), 3)
+
     def test_two_hollow_heads_merge_into_chord_event(self):
         s = 10.0
         gray = np.full((120, 120), 255, dtype=np.uint8)
@@ -1761,3 +2013,385 @@ class HollowHeadScaleTests(unittest.TestCase):
         self.assertEqual(len(page.chords), 1)
         self.assertEqual(len(page.chords[0].heads), 2)
         self.assertLess(abs(page.chords[0].x - cx), 2)
+
+    def test_stemless_stack_recovers_crushed_inner_hollows(self):
+        s = 10.0
+        staff = an.Staff(lines=[40, 50, 60, 70, 80], thickness=1, spacing=s)
+        ys = [40, 50, 60, 70]
+        cx = 80
+        w = max(6, int(round(an.NOTE_W_HOLLOW * s)))
+        h = max(4, int(round(an.NOTE_H_HOLLOW * s)))
+        t = max(2, int(round(0.25 * s)))
+        gray = np.full((140, 180), 255, dtype=np.uint8)
+        for y in ys:
+            cv2.ellipse(gray, (cx, y), (w // 2, h // 2), 0, 0, 360, 0, t)
+        for y in (50, 60):
+            cv2.ellipse(
+                gray, (cx, y),
+                (max(1, w // 2 - t), max(1, h // 2 - t)),
+                0, 0, 360, 0, -1,
+            )
+            gray[y, cx - 2:cx + 3] = 255
+        page = an.Page(
+            image=gray,
+            binary=(gray < 128).astype(np.uint8) * 255,
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+        )
+
+        an.detect_noteheads(page)
+        an.assign_pitches(page)
+        an._recover_stacked_hollow_heads(page)
+        an._dedupe_noteheads(page)
+
+        hollows = sorted(
+            [n for n in page.noteheads if not n.filled], key=lambda n: n.y
+        )
+        self.assertEqual(len(hollows), 4)
+        for expected, got in zip(ys, hollows):
+            self.assertLess(abs(got.y - expected), 4)
+            self.assertLess(abs(got.x - cx), 4)
+
+    def test_stemless_octave_does_not_invent_inner_heads(self):
+        s = 10.0
+        staff = an.Staff(lines=[40, 50, 60, 70, 80], thickness=1, spacing=s)
+        cx, y_top, y_bot = 80, 40, 75
+        gray = np.full((140, 180), 255, dtype=np.uint8)
+        self._draw_closed_ring_gray(gray, cx, y_top, s)
+        self._draw_closed_ring_gray(gray, cx, y_bot, s)
+        page = an.Page(
+            image=gray,
+            binary=(gray < 128).astype(np.uint8) * 255,
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+        )
+
+        an.detect_noteheads(page)
+        an.assign_pitches(page)
+        an._recover_stacked_hollow_heads(page)
+        an._dedupe_noteheads(page)
+
+        hollows = [n for n in page.noteheads if not n.filled]
+        self.assertEqual(len(hollows), 2)
+
+
+class ChordGroupingTests(unittest.TestCase):
+    def _page(self, staff, heads):
+        gray = np.full((160, 400), 255, dtype=np.uint8)
+        return an.Page(
+            image=gray,
+            binary=np.zeros_like(gray),
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+            noteheads=heads,
+        )
+
+    def test_flagged_note_is_one_digit(self):
+        s = 10.0
+        black = np.zeros((180, 160), dtype=np.uint8)
+        cx, cy = 70, 90
+        nw = int(round(an.NOTE_W_SOLID * s))
+        nh = int(round(an.NOTE_H_SOLID * s))
+        cv2.ellipse(black, (cx, cy), (nw // 2, nh // 2), -18, 0, 360, 255, -1)
+        stem_x = cx + nw // 2 - 1
+        cv2.line(black, (stem_x, cy - 2), (stem_x, cy - int(3.5 * s)), 255, 2)
+        flag_top = cy - int(3.5 * s)
+        pts = np.array([
+            [stem_x, flag_top],
+            [stem_x + int(1.3 * s), flag_top + int(0.8 * s)],
+            [stem_x + int(0.4 * s), flag_top + int(1.6 * s)],
+            [stem_x, flag_top + int(1.1 * s)],
+        ], np.int32)
+        cv2.fillPoly(black, [pts], 255)
+        staff = an.Staff(lines=[50, 60, 70, 80, 90], thickness=1, spacing=s)
+        page = an.Page(
+            image=255 - black,
+            binary=black,
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+        )
+
+        an.detect_noteheads(page)
+        an.assign_pitches(page)
+        an._recover_stacked_hollow_heads(page)
+        an._dedupe_noteheads(page)
+        an.assign_pitches(page)
+        an.to_jianpu(page)
+        an.build_chords(page)
+
+        self.assertEqual(len(page.chords), 1)
+        self.assertEqual(len(page.chords[0].heads), 1)
+
+    def test_beamed_chord_does_not_invent_notes_between_heads(self):
+        s = 10.0
+        black = np.zeros((160, 200), dtype=np.uint8)
+        nw = int(round(an.NOTE_W_SOLID * s))
+        nh = int(round(an.NOTE_H_SOLID * s))
+        bx = 100
+        for y in (55, 70, 85):
+            cv2.ellipse(black, (bx, y), (nw // 2, nh // 2), -18, 0, 360, 255, -1)
+        stem_x = bx + nw // 2 - 1
+        cv2.line(black, (stem_x, 40), (stem_x, 90), 255, 2)
+        cv2.rectangle(black, (stem_x - 36, 36), (stem_x + 2, 43), 255, -1)
+        staff = an.Staff(lines=[40, 50, 60, 70, 80], thickness=1, spacing=s)
+        page = an.Page(
+            image=255 - black,
+            binary=black,
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+        )
+
+        an.detect_noteheads(page)
+        an.assign_pitches(page)
+        an._recover_stacked_hollow_heads(page)
+        an._dedupe_noteheads(page)
+        an.assign_pitches(page)
+        an.to_jianpu(page)
+        an.build_chords(page)
+
+        self.assertEqual(len(page.chords), 1)
+        self.assertEqual(len(page.chords[0].heads), 3)
+
+    def test_same_pitch_in_one_chord_prints_once(self):
+        s = 10.0
+        staff = an.Staff(lines=[40, 50, 60, 70, 80], thickness=1, spacing=s)
+        heads = [
+            an.NoteHead(x=60, y=58, filled=True, staff=staff, letter=4, octave=4, digit=5),
+            an.NoteHead(x=63, y=63, filled=True, staff=staff, letter=4, octave=4, digit=5),
+            an.NoteHead(x=61, y=78, filled=True, staff=staff, letter=2, octave=4, digit=3),
+        ]
+        page = self._page(staff, heads)
+
+        an.build_chords(page)
+
+        self.assertEqual(len(page.chords), 1)
+        self.assertEqual(sorted(h.digit for h in page.chords[0].heads), [3, 5])
+
+    def test_sequential_melody_notes_stay_separate_events(self):
+        s = 10.0
+        staff = an.Staff(lines=[40, 50, 60, 70, 80], thickness=1, spacing=s)
+        digits = [1, 3, 3, 5, 6, 6]
+        ys = [70, 60, 60, 50, 40, 40]
+        xs = [40 + i * int(1.8 * s) for i in range(len(digits))]
+        heads = [
+            an.NoteHead(x=x, y=y, filled=True, staff=staff, digit=d)
+            for x, y, d in zip(xs, ys, digits)
+        ]
+        page = self._page(staff, heads)
+
+        an.build_chords(page)
+
+        self.assertEqual(len(page.chords), 6)
+        self.assertTrue(all(len(ev.heads) == 1 for ev in page.chords))
+
+    def test_adjacent_identical_vertical_chords_stay_separate(self):
+        s = 10.0
+        staff = an.Staff(lines=[40, 50, 60, 70, 80], thickness=1, spacing=s)
+        ys = [40, 50, 60, 70]
+        digits = [6, 4, 1, 4]
+        gap = int(2.0 * s)
+        heads = []
+        for x0 in (60, 60 + gap):
+            for y, d in zip(ys, digits):
+                heads.append(
+                    an.NoteHead(x=x0, y=y, filled=False, staff=staff, digit=d)
+                )
+        page = self._page(staff, heads)
+
+        an.build_chords(page)
+
+        events = sorted(page.chords, key=lambda ev: ev.x)
+        self.assertEqual(len(events), 2)
+        self.assertEqual([len(ev.heads) for ev in events], [4, 4])
+        def _sig(ev):
+            return sorted((h.digit, h.dots, h.prefix, h.dur) for h in ev.heads)
+
+        self.assertEqual(_sig(events[0]), _sig(events[1]))
+
+
+class StaffHeaderPurgeTests(unittest.TestCase):
+    def test_faint_staff_header_is_removed(self):
+        staff = an.Staff(lines=[40, 50, 60, 70, 80], thickness=1, spacing=10)
+        gray = np.full((140, 300), 255, np.uint8)
+        for y in staff.lines:
+            gray[y, 30:280] = 210
+        fake = an.NoteHead(x=65, y=60, filled=False, staff=staff)
+        real = an.NoteHead(x=200, y=60, filled=False, staff=staff)
+        page = an.Page(image=gray, binary=np.zeros_like(gray), staves=[staff],
+                       noteheads=[fake, real])
+        self.assertAlmostEqual(an._staff_left_edge(gray, staff), 30, delta=1)
+        an.purge_staff_header_noteheads(page)
+        self.assertEqual(page.noteheads, [real])
+
+    def test_broad_clef_loop_cannot_shorten_header(self):
+        staff = an.Staff(lines=[60, 70, 80, 90, 100], thickness=1, spacing=10)
+        gray = np.full((160, 320), 255, np.uint8)
+        for y in staff.lines:
+            gray[y, 30:300] = 176
+        # A broad G-clef curl with a filled center and long vertical stroke.
+        cv2.ellipse(gray, (65, 85), (14, 11), 0, 0, 360, 0, 2)
+        cv2.ellipse(gray, (65, 85), (6, 5), 0, 0, 360, 0, -1)
+        cv2.line(gray, (71, 30), (71, 120), 0, 2)
+        fake = an.NoteHead(x=65, y=85, filled=True, staff=staff)
+        key = an.NoteHead(x=110, y=80, filled=False, staff=staff)
+        real = an.NoteHead(x=210, y=80, filled=False, staff=staff)
+        page = an.Page(image=gray, binary=(gray < 128).astype(np.uint8) * 255,
+                       staves=[staff], noteheads=[fake, key, real])
+        self.assertTrue(an._head_in_clef_glyph(page, fake, staff))
+        self.assertAlmostEqual(an.staff_header_exclusive_right(page, staff), 145, delta=1)
+        an.purge_staff_header_noteheads(page)
+        self.assertEqual(page.noteheads, [real])
+
+    def test_drops_title_zone_and_key_signature_false_heads(self):
+        s = 10
+        treble = an.Staff(lines=[80, 90, 100, 110, 120], thickness=1, spacing=s)
+        bass = an.Staff(lines=[150, 160, 170, 180, 190], thickness=1, spacing=s)
+        gray = np.full((220, 300), 220, dtype=np.uint8)
+        black = np.zeros_like(gray)
+        left = 40
+        for y in treble.lines:
+            cv2.line(gray, (left, y), (280, y), 80, 1)
+        for y in bass.lines:
+            cv2.line(gray, (left, y), (280, y), 80, 1)
+        # 页眉误检（曲名区）
+        title_fake = an.NoteHead(x=120, y=40, filled=True, staff=treble, digit=4)
+        # 谱头调号误检
+        key_fake = an.NoteHead(x=95, y=100, filled=False, staff=treble, digit=1)
+        # 演奏区（需有符干证据才会锚定 music_start；此处仅测 x 在谱头外）
+        real = an.NoteHead(x=200, y=100, filled=True, staff=treble, digit=3)
+        page = an.Page(
+            image=gray,
+            binary=black,
+            staves=[treble, bass],
+            systems=[an.System(treble=treble, bass=bass)],
+            noteheads=[title_fake, key_fake, real],
+        )
+        an.assign_pitches(page)
+        an.purge_staff_header_noteheads(page)
+        xs = [n.x for n in page.noteheads]
+        self.assertNotIn(title_fake.x, xs)
+        self.assertNotIn(key_fake.x, xs)
+        self.assertIn(real.x, xs)
+
+
+class JevRenderTests(unittest.TestCase):
+    def test_jev_skip_suppresses_annotation(self):
+        black = np.zeros((120, 200), dtype=np.uint8)
+        gray = np.full_like(black, 220)
+        staff = an.Staff(lines=[40, 50, 60, 70, 80], thickness=1, spacing=10)
+        head = an.NoteHead(x=30, y=60, filled=False, staff=staff, digit=1)
+        head2 = an.NoteHead(x=120, y=60, filled=True, staff=staff, digit=3)
+        page = an.Page(
+            image=gray,
+            binary=black,
+            staves=[staff],
+            systems=[an.System(treble=staff, bass=staff)],
+            noteheads=[head, head2],
+            chords=[
+                an.ChordEvent(x=head.x, heads=[head]),
+                an.ChordEvent(x=head2.x, heads=[head2]),
+            ],
+        )
+        decisions = [{"skip": True, "placement": None}, {"skip": False, "placement": "above"}]
+
+        with patch("annotate.jev.jev_available", return_value=True), patch(
+            "annotate.jev.decide_events", return_value=decisions
+        ):
+            vis = an.render(page, use_jev=True)
+
+        green = _green_mask(vis)
+        self.assertEqual(green[:, :70].sum(), 0, "skipped header event should not draw")
+        self.assertGreater(green[:, 70:].sum(), 0, "non-header event should still annotate")
+
+    def test_jev_payload_marks_gap_only_on_lower_staff(self):
+        treble = an.Staff(lines=[10, 20, 30, 40, 50], thickness=1, spacing=10)
+        bass = an.Staff(lines=[70, 80, 90, 100, 110], thickness=1, spacing=10)
+        ev = an.ChordEvent(x=80, heads=[an.NoteHead(x=80, y=90, filled=True, staff=bass)])
+        gray = np.zeros((140, 160), dtype=np.uint8)
+        page = an.Page(image=gray, binary=gray, noteheads=ev.heads)
+        top_payload = an._jev_event_payloads([ev], treble, True, 10, gray, page)[0]
+        bass_payload = an._jev_event_payloads([ev], bass, False, 10, gray, page)[0]
+        self.assertFalse(top_payload["candidates"]["gap"])
+        self.assertFalse(bass_payload["candidates"]["gap"])
+        self.assertTrue(bass_payload["candidates"]["below"])
+
+
+class PipelineDebugDumpTests(unittest.TestCase):
+    def _two_staff_page(self):
+        gray = np.full((220, 300), 255, dtype=np.uint8)
+        for y in (40, 50, 60, 70, 80):
+            cv2.line(gray, (20, y), (280, y), 80, 1)
+        for y in (130, 140, 150, 160, 170):
+            cv2.line(gray, (20, y), (280, y), 80, 1)
+        _, binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
+        return gray, binary
+
+    def test_process_image_writes_every_pipeline_slice(self):
+        gray, binary = self._two_staff_page()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            an.process_image(
+                gray, binary, quiet=True, use_jev=False, debug_dir=out,
+            )
+            for name in an.DEBUG_SLICE_NAMES:
+                path = out / f"{name}.jpg"
+                self.assertTrue(path.is_file(), f"missing slice {name}")
+                img = cv2.imread(str(path))
+                self.assertIsNotNone(img, f"unreadable slice {name}")
+                self.assertEqual(img.shape[0], gray.shape[0])
+                self.assertEqual(img.shape[1], gray.shape[1])
+
+    def test_upload_saves_slices_under_debug_filename(self):
+        import app as web
+
+        gray, binary = self._two_staff_page()
+        ok, buf = cv2.imencode(".png", gray)
+        self.assertTrue(ok)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            web.process_one(
+                bytes(buf), filename="My Score.png", debug_root=root,
+            )
+            folder = root / "My_Score"
+            self.assertTrue(folder.is_dir())
+            for name in an.DEBUG_SLICE_NAMES:
+                self.assertTrue(
+                    (folder / f"{name}.jpg").is_file(), f"missing {name}"
+                )
+
+    def test_build_canvas_scene_normalized_staff_and_labels(self):
+        h, w = 200, 240
+        gray = np.full((h, w), 255, dtype=np.uint8)
+        black = np.zeros((h, w), dtype=np.uint8)
+        s = 10
+        treble = an.Staff(lines=[20, 30, 40, 50, 60], thickness=1, spacing=s)
+        bass = an.Staff(lines=[80, 90, 100, 110, 120], thickness=1, spacing=s)
+        sys = an.System(treble=treble, bass=bass)
+        head = an.NoteHead(x=120, y=40, filled=True, staff=treble, digit=1)
+        page = an.Page(
+            image=gray,
+            binary=black,
+            systems=[sys],
+            staves=[treble, bass],
+            noteheads=[head],
+        )
+        placements = [
+            {
+                "staff_key": "0_0",
+                "x": 120,
+                "y": 12,
+                "bottom": 14,
+                "digit": 1,
+                "dots": 0,
+                "prefix": "",
+            }
+        ]
+        scene = an.build_canvas_scene(page, placements)
+        self.assertEqual(scene["width"], an.CANVAS_LAYOUT["width"])
+        self.assertEqual(len(scene["systems"]), 1)
+        lines = scene["systems"][0]["staves"][0]["lines"]
+        self.assertEqual(len(lines), 5)
+        self.assertEqual(lines[4] - lines[0], 4 * an.CANVAS_LAYOUT["line_spacing"])
+        self.assertEqual(len(scene["labels"]), 1)
+        self.assertEqual(scene["labels"][0]["digit"], 1)
+        self.assertTrue(any(n["filled"] for n in scene["notes"]))

@@ -1,0 +1,191 @@
+.wrap {
+  padding: 32rpx 28rpx 80rpx;
+}
+
+.hero .title {
+  display: block;
+  font-size: 36rpx;
+  font-weight: 600;
+  margin-bottom: 8rpx;
+}
+
+.hero .sub {
+  display: block;
+  color: #888;
+  font-size: 26rpx;
+  margin-bottom: 28rpx;
+}
+
+.panel {
+  display: flex;
+  gap: 20rpx;
+  margin-bottom: 24rpx;
+}
+
+.btn {
+  flex: 1;
+  font-size: 30rpx;
+  border-radius: 16rpx;
+}
+
+.btn.primary {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.btn.ghost {
+  background: #e5e7eb;
+  color: #333;
+}
+
+.progress {
+  margin-bottom: 20rpx;
+}
+
+.progress { display: flex; align-items: center; gap: 20rpx; padding: 28rpx; background: #eaf2e9; border-radius: 20rpx; }
+.spinner { width: 36rpx; height: 36rpx; flex-shrink: 0; border: 4rpx solid #a8caba; border-top-color: #23745e; border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.hint {
+  display: block;
+  margin-top: 10rpx;
+  font-size: 24rpx;
+  color: #666;
+}
+
+.summary {
+  font-size: 28rpx;
+  color: #16a34a;
+  font-weight: 600;
+  margin: 16rpx 0 20rpx;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 20rpx;
+}
+
+.card {
+  background: #fff;
+  border: 1rpx solid #e4e7ec;
+  border-radius: 20rpx;
+  overflow: hidden;
+}
+
+.card.err {
+  border-color: #f3c6c6;
+}
+
+.thumb-wrap {
+  position: relative;
+  background: #f0f1f3;
+  height: 360rpx;
+}
+
+.thumb {
+  width: 100%;
+  height: 360rpx;
+}
+
+.zoom-tag {
+  position: absolute;
+  right: 16rpx;
+  top: 16rpx;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 22rpx;
+  padding: 6rpx 14rpx;
+  border-radius: 8rpx;
+}
+
+.meta {
+  padding: 20rpx 24rpx 24rpx;
+}
+
+.fname {
+  display: block;
+  font-size: 24rpx;
+  color: #555;
+  margin-bottom: 8rpx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.st {
+  display: block;
+  font-size: 24rpx;
+  margin-bottom: 12rpx;
+}
+
+.st.pending { color: #9ca3af; }
+.st.doing { color: #d97706; }
+.st.ok { color: #16a34a; }
+.st.error { color: #dc2626; }
+
+.ops {
+  display: flex;
+  gap: 16rpx;
+}
+
+.ops button {
+  flex: 1;
+}
+
+.errtxt {
+  display: block;
+  font-size: 24rpx;
+  color: #dc2626;
+  margin-top: 8rpx;
+}
+
+.foot {
+  margin-top: 48rpx;
+}
+
+.api {
+  display: block;
+  font-size: 22rpx;
+  color: #9ca3af;
+  word-break: break-all;
+}
+
+.tip {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 22rpx;
+  color: #b0b5bd;
+  line-height: 1.5;
+}
+
+.wrap { padding: 44rpx 32rpx 80rpx; padding-bottom: calc(80rpx + env(safe-area-inset-bottom)); }
+.eyebrow { display: block; font-size: 20rpx; letter-spacing: 3rpx; color: #23745e; font-weight: 600; margin-bottom: 18rpx; }
+.hero .title { font-size: 48rpx; font-weight: 700; letter-spacing: -1rpx; }
+.hero .sub { color: #72817b; line-height: 1.7; margin-bottom: 36rpx; }
+.panel { background: #fffefa; padding: 32rpx; border: 2rpx dashed #b5c8bd; border-radius: 28rpx; flex-wrap: wrap; gap: 16rpx; }
+.upload-copy { width: 100%; margin-bottom: 12rpx; }
+.upload-title { display: block; font-size: 32rpx; font-weight: 600; }
+.upload-hint { display: block; color: #72817b; font-size: 24rpx; margin-top: 8rpx; }
+.btn { margin: 0; min-height: 88rpx; font-size: 28rpx; border-radius: 18rpx; }
+button::after { border: none; }
+.btn.primary { background: #23745e; }
+.btn.ghost { background: #e7ebe3; color: #203d36; }
+.btn[disabled] { background: #dce5dc; color: #84988b; }
+.empty { padding: 60rpx 24rpx; text-align: center; }
+.empty-symbol { display: block; color: #94b09e; font-size: 52rpx; letter-spacing: 16rpx; margin-bottom: 24rpx; }
+.empty-title { display: block; font-weight: 600; font-size: 30rpx; }
+.empty-sub { display: block; color: #72817b; font-size: 24rpx; line-height: 1.8; margin-top: 14rpx; }
+.progress .hint { margin: 0; color: #23745e; }
+.summary { color: #23745e; font-size: 26rpx; line-height: 1.7; }
+.card { border-color: #dfe6df; border-radius: 26rpx; box-shadow: 0 8rpx 32rpx rgba(32,61,54,.04); }
+.thumb-wrap { background: #ecefe7; padding: 20rpx; box-sizing: border-box; }
+.thumb { height: 320rpx; }
+.zoom-tag { background: rgba(32,61,54,.85); border-radius: 12rpx; }
+.meta { padding: 26rpx; }
+.fname { font-size: 26rpx; color: #203d36; }
+.st { font-size: 22rpx; margin-bottom: 18rpx; }
+.st.ok { color: #23745e; }
+.ops button { margin: 0; background: #edf3ec; color: #23745e; border-radius: 14rpx; line-height: 72rpx; }
+.foot { margin-top: 36rpx; text-align: center; }
+.tip { color: #72817b; }

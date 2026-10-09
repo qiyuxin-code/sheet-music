@@ -25,7 +25,15 @@
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install opencv-python numpy fastapi uvicorn python-multipart
+pip install -r requirements.txt
+```
+
+可选：配置 [Jev](https://console.typesafe.ai)（TypeSafe System One）后，渲染阶段可辅助判断是否属于行首曲谱头（谱号、调号、拍号等）。标注方向始终遵守大谱表上下行规则，不允许模型改到相反一侧。
+
+```bash
+export TYPESAFE_API_KEY="apikey_..."   # 勿提交到 git
+python annotate.py score.jpg --jev      # 显式启用；已配置 Key 时默认也会启用
+python annotate.py score.jpg --no-jev   # 强制仅用 OpenCV 规则
 ```
 
 ## 使用
@@ -38,12 +46,22 @@ python app.py                     # 启动后打开 http://127.0.0.1:8000
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-浏览器打开后批量选择/拖拽图片，一键标注并打包下载 zip（含 `results.json` 处理清单）。
+浏览器打开后批量选择/拖拽图片，一键标注并平铺展示结果。
 也可直接调用接口：
 
 ```bash
-curl -F "files=@a.jpg" -F "files=@b.png" http://127.0.0.1:8000/api/batch -o result.zip
+curl -F "files=@a.jpg" -F "files=@b.png" http://127.0.0.1:8000/api/batch
+curl -F "file=@a.jpg" http://127.0.0.1:8000/api/annotate
 ```
+
+### 微信小程序
+
+1. 启动后端：`python app.py`
+2. 用 [微信开发者工具](https://developers.weixin.qq.com/miniprogram/dev/devtools/download.html) 打开本仓库下的 `miniprogram/` 目录
+3. 在 `miniprogram/config.js` 中把 `apiBase` 改为你的服务地址（真机调试请用电脑局域网 IP，如 `http://192.168.x.x:8000`）
+4. 开发者工具 → 详情 → 本地设置 → 勾选 **不校验合法域名**（仅开发环境）
+
+小程序通过 `POST /api/annotate` 逐张上传图片，展示缩略图并支持预览、保存到相册。
 
 ### 命令行（单张）
 
@@ -58,12 +76,21 @@ python annotate.py input.jpg --stage 3           # 只运行到阶段 3（调试
 
 ```
 annotate.py   主程序（全部逻辑）
-app.py        FastAPI Web 服务（批量上传 /api/batch）
-index.html    上传页面
+app.py        FastAPI Web 服务（/api/batch、/api/annotate）
+index.html    Web 上传页面
+miniprogram/  微信小程序客户端
 debug/        调试图输出（已 gitignore）
 .venv/        Python 虚拟环境（已 gitignore）
 ```
 
 ## 输出示例
+
+回归检查：`python -m unittest discover -s tests`；前端状态与小程序预览检查：`node tests/test_frontend.js`。`tests/test_score_feedback.py` 包含用户反馈谱面的二值裁剪，覆盖白格误检及下加线音符漏检。
+
+谱头过滤支持浅灰谱线，并额外排除行首高音谱号的长连通字形。叠印找不到附近空白位置时会跳过该标注，避免盖住原谱。Web 与小程序使用同一识别流程，上传的逐阶段调试图位于 `debug/<文件名>/`。
+
+谱号识别覆盖行首与正文中的高低音谱号变化，音高按当前谱号计算。花括号连接的谱表按整体分组：上行蓝字放在音符及谱表上方，下行绿字放在整条下谱表下方；颜色按行的位置决定，不随换谱号改变。和弦按音高整列排列，每颗符头只标一次，逐列避让，不强制一行统一基线。空间紧张时缩小字号，仍无安全空位才跳过。相接符头只在存在两个形状峰和收窄处时拆分，避免一音多标。
+
+网页大图可用左右按钮或键盘方向键切换，滚轮/双指缩放、拖拽查看，返回上一张时保留其缩放位置。小程序使用微信原生多图预览，支持滑动切换、双指缩放和放大后拖动。处理过程中显示 loading 动画。
 
 运行后输出图片，终端打印简谱分布统计（前 20）。

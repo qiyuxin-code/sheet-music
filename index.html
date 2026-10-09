@@ -30,9 +30,6 @@
          font-size: 15px; cursor: pointer; background: #3b82f6; color: #fff; }
   .btn:disabled { background: #9db7dd; cursor: not-allowed; }
   .btn.secondary { background: #e5e7eb; color: #333; }
-  .bar { height: 6px; border-radius: 3px; background: #e4e7ec; overflow: hidden;
-         margin: 14px 0 8px; display: none; }
-  .bar > div { height: 100%; width: 0; background: #3b82f6; transition: width .2s; }
   .msg { font-size: 13px; color: #666; margin-top: 8px; min-height: 18px; }
   .actions { margin-top: 20px; display: flex; gap: 10px; align-items: center; }
 
@@ -75,20 +72,25 @@
            font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s; }
   .toast.show { opacity: 1; }
 </style>
+<link rel="stylesheet" href="/ui.css">
 </head>
 <body>
 <div class="wrap">
-  <h1>简谱批量标注</h1>
-  <p class="sub">批量上传五线谱图片，自动识别音符并叠印简谱数字，结果直接平铺展示</p>
+  <header class="hero"><span class="eyebrow">SCORE STUDIO · 乐谱工作台</span>
+  <h1>让五线谱，更好读。</h1>
+  <p class="sub">上传乐谱，自动添加简谱标注。放大核对，保存后随时练习。</p></header>
 
-  <div class="drop" id="drop">
+  <div class="drop" id="drop" role="button" tabindex="0" aria-label="选择乐谱图片">
     <input type="file" id="file" multiple accept="image/*">
-    <div class="hint">点击选择或拖拽图片到此处</div>
+    <div class="upload-icon" aria-hidden="true">↑</div>
+    <div class="hint">选择乐谱图片</div>
     <div class="sub2">支持多选批量上传（jpg / png / bmp，单次最多 200 张）</div>
   </div>
 
   <ul id="list"></ul>
-  <div class="bar"><div id="barInner"></div></div>
+  <div class="loading" id="loading" role="status" aria-live="polite" hidden>
+    <span class="spinner" aria-hidden="true"></span><span>正在识别和标注乐谱，请稍候…</span>
+  </div>
 
   <div class="actions">
     <button class="btn" id="go" disabled>开始标注</button>
@@ -96,12 +98,14 @@
     <span class="msg" id="msg"></span>
   </div>
 
-  <div id="resultArea"></div>
+  <div id="resultArea" aria-live="polite"></div>
+  <p class="footnote">大谱表上行用蓝字标在上方，下行用绿字标在下方；自动标注请结合原谱核对。</p>
 </div>
 
-<div class="modal" id="modal">
+<div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="乐谱预览">
   <div class="mbar">
     <span class="fname" id="mName"></span>
+    <span id="mCounter" aria-live="polite"></span>
     <div class="zctrl">
       <span id="mZoom">100%</span>
       <button id="zOut">-</button>
@@ -113,8 +117,12 @@
     </div>
   </div>
   <div class="viewport" id="viewport">
-    <img id="mImg" alt="">
+    <img id="mImg" alt="" draggable="false">
   </div>
+  <button class="gallery-nav prev" id="mPrev" aria-label="上一张图片">‹</button>
+  <button class="gallery-nav next" id="mNext" aria-label="下一张图片">›</button>
+  <div class="preview-loading" id="previewLoading" hidden><span class="spinner"></span></div>
+  <div class="viewer-hint">左右切换 · 滚轮或双指缩放 · 拖动查看</div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -122,13 +130,18 @@
 const $ = s => document.querySelector(s);
 const drop = $('#drop'), fileInput = $('#file'), listEl = $('#list'),
       goBtn = $('#go'), clearBtn = $('#clear'), msgEl = $('#msg'),
-      bar = $('.bar'), barInner = $('#barInner'), resultArea = $('#resultArea'),
+      loading = $('#loading'), resultArea = $('#resultArea'),
       modal = $('#modal'), viewport = $('#viewport'), mImg = $('#mImg'),
       mName = $('#mName'), mZoom = $('#mZoom');
 let files = [];
-let viewState = null;  // {img, zoom, tx, ty}
+let busy = false;
+let viewState = null;
+let previewResults = [];
+let previewIndex = -1;
+const savedViews = new Map();
+const pointers = new Map();
+let gesture = null;
 
-/* ---------- 文件选择 ---------- */
 function renderList() {
   listEl.innerHTML = '';
   files.forEach((f, i) => {
@@ -146,22 +159,31 @@ function renderList() {
     li.append(name, st);
     listEl.appendChild(li);
   });
-  goBtn.disabled = files.length === 0;
+  goBtn.disabled = busy || files.length === 0;
 }
 function addFiles(list) {
-  for (const f of list) files.push({ name: f.name, file: f, status: '' });
+  if (busy) return;
+  const picked = Array.from(list).filter(f => /\.(jpe?g|png|bmp)$/i.test(f.name));
+  if (picked.length !== list.length) toast('请选择 JPG、PNG 或 BMP 图片');
+  const remaining = Math.max(0, 200 - files.length);
+  if (picked.length > remaining) toast('单次最多选择 200 张图片');
+  for (const f of picked.slice(0, remaining)) files.push({ name: f.name, file: f, status: '' });
   renderList();
 }
-drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('click', () => { if (!busy) fileInput.click(); });
+drop.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!busy) fileInput.click(); }
+});
 drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('hover'); });
 drop.addEventListener('dragleave', () => drop.classList.remove('hover'));
 drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('hover'); addFiles(e.dataTransfer.files); });
 fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
 clearBtn.addEventListener('click', () => {
+  if (busy) return;
+  closeModal(); previewResults = []; savedViews.clear();
   files = []; renderList(); resultArea.innerHTML = ''; msgEl.textContent = '';
 });
 
-/* ---------- 复制 / 下载 ---------- */
 let toastTimer = null;
 function toast(text) {
   $('#toast').textContent = text;
@@ -187,8 +209,10 @@ function downloadImage(dataUrl, name) {
   a.remove();
 }
 
-/* ---------- 结果展示 ---------- */
 function showResults(results) {
+  closeModal();
+  previewResults = results.filter(r => r.status === 'ok');
+  savedViews.clear();
   resultArea.innerHTML = '';
   const ok = results.filter(r => r.status === 'ok');
   const err = results.length - ok.length;
@@ -248,23 +272,50 @@ function showResults(results) {
   resultArea.appendChild(grid);
 }
 
-/* ---------- 放大预览 ---------- */
 function openModal(r) {
-  mName.textContent = r.filename;
-  mImg.src = 'data:image/jpeg;base64,' + r.img;
-  mImg.onload = () => {
-    viewState = { img: mImg, zoom: 1, tx: 0, ty: 0 };
-    viewport.scrollLeft = 0; viewport.scrollTop = 0;
-    fitView();
-  };
+  const index = previewResults.indexOf(r);
+  if (index < 0) return;
   modal.classList.add('open');
   document.body.style.overflow = 'hidden';
+  showPreview(index);
+}
+function rememberView() {
+  if (previewIndex >= 0 && viewState) savedViews.set(previewIndex, { ...viewState });
+}
+function showPreview(index) {
+  if (index < 0 || index >= previewResults.length) return;
+  rememberView();
+  previewIndex = index;
+  viewState = null; pointers.clear(); gesture = null;
+  viewport.classList.remove('dragging');
+  const r = previewResults[index];
+  mName.textContent = r.filename;
+  mImg.alt = r.filename;
+  $('#mCounter').textContent = `${index + 1} / ${previewResults.length}`;
+  $('#mPrev').disabled = index === 0;
+  $('#mNext').disabled = index === previewResults.length - 1;
+  $('#previewLoading').hidden = false;
+  mImg.style.visibility = 'hidden';
+  mImg.onload = () => {
+    viewState = savedViews.get(index) || { zoom: 1, tx: 0, ty: 0 };
+    if (savedViews.has(index)) applyTransform(); else fitView();
+    $('#previewLoading').hidden = true;
+    mImg.style.visibility = 'visible';
+  };
+  mImg.onerror = () => { $('#previewLoading').hidden = true; toast('图片加载失败，请切换或重试'); };
+  mImg.src = 'data:image/jpeg;base64,' + r.img;
+}
+function changePreview(delta) {
+  showPreview(previewIndex + delta);
 }
 function closeModal() {
+  rememberView();
   modal.classList.remove('open');
   document.body.style.overflow = '';
+  mImg.onload = null; mImg.onerror = null;
   mImg.src = '';
-  viewState = null;
+  viewState = null; previewIndex = -1; pointers.clear(); gesture = null;
+  $('#previewLoading').hidden = true;
 }
 function applyTransform() {
   if (!viewState) return;
@@ -287,8 +338,8 @@ function zoomAt(px, py, factor) {
   const { zoom } = viewState;
   const nz = Math.max(0.05, Math.min(20, zoom * factor));
   if (nz === zoom) return;
-  const vw = viewport.clientWidth, vh = viewport.clientHeight;
-  const cx = (px - viewState.tx) / zoom, cy = (py - viewState.ty) / zoom;
+  const cx = (px - viewState.tx) / zoom;
+  const cy = (py - viewState.ty) / zoom;
   viewState.zoom = nz;
   viewState.tx = px - cx * nz;
   viewState.ty = py - cy * nz;
@@ -298,37 +349,67 @@ $('#zIn').addEventListener('click', () => zoomAt(viewport.clientWidth / 2, viewp
 $('#zOut').addEventListener('click', () => zoomAt(viewport.clientWidth / 2, viewport.clientHeight / 2, 1 / 1.3));
 $('#zReset').addEventListener('click', fitView);
 $('#mClose').addEventListener('click', closeModal);
+$('#mPrev').addEventListener('click', () => changePreview(-1));
+$('#mNext').addEventListener('click', () => changePreview(1));
 modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
 viewport.addEventListener('wheel', e => {
   e.preventDefault();
   const rect = viewport.getBoundingClientRect();
   zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.15 : 1 / 1.15);
 }, { passive: false });
-viewport.addEventListener('mousedown', e => {
-  if (!viewState) return;
-  viewport.classList.add('dragging');
-  const sx = e.clientX, sy = e.clientY, { tx, ty } = viewState;
-  const move = ev => {
-    viewState.tx = tx + (ev.clientX - sx);
-    viewState.ty = ty + (ev.clientY - sy);
-    applyTransform();
-  };
-  const up = () => { viewport.classList.remove('dragging'); window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
-  window.addEventListener('mousemove', move);
-  window.addEventListener('mouseup', up);
+function currentGesture() {
+  const points = [...pointers.values()];
+  if (!points.length) return null;
+  if (points.length === 1) return { x: points[0].x, y: points[0].y, distance: 0 };
+  return { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2,
+           distance: Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) };
+}
+viewport.addEventListener('pointerdown', e => {
+  if (!viewState || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  e.preventDefault(); viewport.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  gesture = currentGesture(); viewport.classList.add('dragging');
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+viewport.addEventListener('pointermove', e => {
+  if (!viewState || !pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  const next = currentGesture();
+  if (gesture && next) {
+    if (gesture.distance > 0 && next.distance > 0) {
+      const rect = viewport.getBoundingClientRect();
+      zoomAt(gesture.x - rect.left, gesture.y - rect.top, next.distance / gesture.distance);
+    }
+    viewState.tx += next.x - gesture.x; viewState.ty += next.y - gesture.y;
+    applyTransform();
+  }
+  gesture = next;
+});
+function endPointer(e) {
+  pointers.delete(e.pointerId); gesture = currentGesture();
+  if (!pointers.size) viewport.classList.remove('dragging');
+}
+viewport.addEventListener('pointerup', endPointer);
+viewport.addEventListener('pointercancel', endPointer);
+viewport.addEventListener('lostpointercapture', endPointer);
+document.addEventListener('keydown', e => {
+  if (previewIndex < 0) return;
+  if (e.key === 'Escape') closeModal();
+  if (e.key === 'ArrowLeft') { e.preventDefault(); changePreview(-1); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); changePreview(1); }
+});
 
 $('#mCopy').addEventListener('click', () => copyImage(mImg.src));
 $('#mDown').addEventListener('click', () =>
   downloadImage(mImg.src, mName.textContent.replace(/\.[^.]+$/, '') + '_简谱标注.jpg'));
 
-/* ---------- 提交 ---------- */
 goBtn.addEventListener('click', async () => {
+  if (busy || !files.length) return;
+  busy = true;
+  drop.setAttribute('aria-disabled', 'true');
   goBtn.disabled = true; clearBtn.disabled = true;
   msgEl.textContent = '上传处理中…';
-  bar.style.display = 'block'; barInner.style.width = '20%';
-  files.forEach(f => { if (f.status !== '成功' && f.status !== '失败') f.status = '处理中'; });
+  loading.hidden = false;
+  files.forEach(f => { f.status = '处理中'; f.error = ''; });
   renderList();
   const form = new FormData();
   files.forEach(f => form.append('files', f.file, f.name));
@@ -336,18 +417,23 @@ goBtn.addEventListener('click', async () => {
     const resp = await fetch('/api/batch', { method: 'POST', body: form });
     if (!resp.ok) throw new Error(`服务器错误 ${resp.status}`);
     const data = await resp.json();
-    files.forEach(f => { f.status = '成功'; });
+    files.forEach((f, i) => {
+      const result = data.results[i];
+      f.status = result && result.status === 'ok' ? '成功' : '失败';
+      f.error = result ? result.error || '' : '未收到处理结果';
+    });
     showResults(data.results);
     msgEl.textContent = '处理完成';
-    barInner.style.width = '100%';
   } catch (e) {
     files.forEach(f => { if (f.status === '处理中') { f.status = '失败'; f.error = e.message; } });
     msgEl.textContent = '处理失败：' + e.message;
   }
+  busy = false;
+  loading.hidden = true;
+  drop.setAttribute('aria-disabled', 'false');
   renderList();
   goBtn.disabled = files.length === 0;
   clearBtn.disabled = false;
-  setTimeout(() => { bar.style.display = 'none'; barInner.style.width = '0'; }, 1000);
 });
 </script>
 </body>

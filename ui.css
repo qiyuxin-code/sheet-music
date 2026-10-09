@@ -1,0 +1,63 @@
+:root { --ink: #203d36; --muted: #72817b; --accent: #23745e; --line: #dfe6df; }
+body { background: #f6f7f2; color: var(--ink); line-height: 1.6; }
+.wrap { max-width: 1120px; padding: 48px 28px 64px; }
+.hero { margin-bottom: 32px; }
+.eyebrow { color: var(--accent); font-size: 11px; letter-spacing: 2px; font-weight: 700; }
+h1 { font-size: clamp(28px, 4vw, 42px); letter-spacing: -1px; margin: 10px 0; }
+p.sub { color: var(--muted); margin: 0; line-height: 1.8; }
+.drop { border: 1.5px dashed #b5c8bd; border-radius: 24px; padding: 40px 20px; background: #fffefa; }
+.drop:hover, .drop.hover { border-color: var(--accent); background: #edf5ef; }
+.drop[aria-disabled="true"] { opacity: .55; cursor: wait; }
+.upload-icon { width: 52px; height: 52px; margin: 0 auto 14px; border-radius: 16px; background: #e6f0e8; color: var(--accent); font-size: 30px; }
+.drop .hint { color: var(--ink); font-weight: 600; font-size: 18px; }
+.drop .sub2 { color: var(--muted); margin-top: 8px; }
+.actions { flex-wrap: wrap; gap: 12px; }
+.btn { background: var(--accent); border-radius: 12px; padding: 12px 26px; min-height: 46px; font-weight: 600; }
+.btn:hover:not(:disabled) { background: #195943; }
+.btn:disabled { background: #a5beb0; }
+.btn.secondary { color: var(--ink); background: #e7ebe3; }
+.btn.secondary:hover:not(:disabled) { background: #d8e1d5; }
+.msg { color: var(--muted); }
+ul#list { max-height: 260px; overflow: auto; }
+ul#list li { padding: 12px 16px; border-color: var(--line); border-radius: 12px; gap: 16px; }
+.st { flex-shrink: 0; }
+.loading { display: flex; align-items: center; gap: 12px; padding: 18px 20px; margin-top: 16px; border-radius: 14px; background: #eaf2e9; color: var(--accent); font-size: 14px; }
+.loading[hidden], .preview-loading[hidden] { display: none; }
+.spinner { display: inline-block; width: 22px; height: 22px; flex-shrink: 0; border: 2px solid #a8caba; border-top-color: #23745e; border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.summary { color: var(--accent); padding: 18px 0 8px; }
+.grid { gap: 20px; }
+.card { border-color: var(--line); border-radius: 18px; box-shadow: 0 6px 24px #203d3606; }
+.card .thumbwrap { background: #ecefe7; padding: 16px; }
+.card img.thumb { height: 260px; }
+.card .meta { padding: 18px; }
+.card .fname { font-size: 13px; color: var(--ink); margin-bottom: 14px; }
+.card .ops button { min-height: 40px; border-radius: 9px; color: var(--ink); }
+.card .ops button:hover { background: #edf5ef; border-color: var(--accent); color: var(--accent); }
+.card .zoom-ico { background: #203d36d9; border-radius: 8px; }
+.footnote { font-size: 12px; color: var(--muted); margin-top: 32px; }
+.modal .mbar { flex-wrap: wrap; background: #203d36; padding: 14px 18px; }
+.modal .mbar .zctrl { flex-wrap: wrap; }
+.modal .mbar button { min-height: 40px; }
+.viewport { touch-action: none; }
+.gallery-nav { position: absolute; top: 50%; z-index: 2; width: 48px; height: 64px; border: 1px solid #ffffff35; border-radius: 14px; color: #fff; background: #203d36d9; font-size: 36px; cursor: pointer; transform: translateY(-50%); }
+.gallery-nav.prev { left: 16px; }
+.gallery-nav.next { right: 16px; }
+.gallery-nav:disabled { opacity: .25; cursor: default; }
+.viewer-hint { padding: 8px 16px; text-align: center; color: #ccd9d1; font-size: 12px; background: #203d36; }
+.preview-loading { position: absolute; top: 50%; left: 50%; }
+#mCounter { color: #c6d9cd; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.toast { z-index: 100; background: var(--ink); }
+button:focus-visible, .drop:focus-visible { outline: 3px solid #74b79b; outline-offset: 4px; }
+@media (max-width: 600px) {
+  .wrap { padding: 28px 18px 40px; }
+  .hero { margin-bottom: 24px; }
+  .drop { padding: 30px 16px; }
+  .actions .msg { flex-basis: 100%; }
+  .grid { grid-template-columns: 1fr; }
+  .modal .mbar .fname { flex-basis: 100%; }
+  .gallery-nav { width: 36px; height: 52px; }
+  .gallery-nav.prev { left: 6px; }
+  .gallery-nav.next { right: 6px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } .spinner { animation-duration: 2s; } }

@@ -1,0 +1,7 @@
+opencv-python
+numpy
+fastapi
+uvicorn
+python-multipart
+typesafe-sdk
+socksio

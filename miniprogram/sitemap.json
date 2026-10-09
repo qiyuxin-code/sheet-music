@@ -1,0 +1,7 @@
+{
+  "desc": "简谱标注",
+  "rules": [{
+    "action": "allow",
+    "page": "*"
+  }]
+}
